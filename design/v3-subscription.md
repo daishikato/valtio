@@ -2,7 +2,7 @@
 
 Status: proposal. Nothing in this document is implemented as the agreed design.
 
-This branch is `v3-o1-subscription`, merged into `v3`. The goal is fast in-place updates for large state, with breaks that show up as a TypeScript error or a runtime error when that is practical.
+The implementation will land on `v3-o1-subscription` and merge into `v3`. This document is only the proposal. The goal is fast in-place updates for large state, with breaks that show up as a TypeScript error or a runtime error when that is practical.
 
 ## Problem
 
