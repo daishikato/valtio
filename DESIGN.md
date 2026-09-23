@@ -6,7 +6,7 @@ Draft · 2026-09-23
 
 A leaf write should cost O(readers of that key + ancestors), independent of how many siblings or unrelated subscribers exist. This draft proposes three changes to get there, and nothing is implemented until we agree on it.
 
-1. **Vanilla:** per-key versions and key subscriptions, plus on-demand upward version propagation, so no snapshot has to walk the whole tree.
+1. **Vanilla:** per-key versions and key subscriptions, plus lazy upward version propagation, so no snapshot has to walk the whole tree.
 2. **React:** re-render when a read key's version has moved past the version the render saw. No leaf comparison, no proxy-compare.
 3. **Boundary:** `valtio/react` uses only public `valtio/vanilla` APIs, and vanilla never refers to React. Vanilla adds three exports and extends two existing ones.
 
@@ -83,7 +83,7 @@ Two PRs, in order: a precursor that makes notifications sync-only, then the `v3-
 
 Tests from the WIP branches are ported into the commit whose behavior they cover. Both branches are pushed to `daishikato/valtio`.
 
-## Vanilla: version model and on-demand propagation
+## Vanilla: version model and lazy propagation
 
 Every write takes one number from a global clock, and vanilla records it at two granularities: per key and per proxy subtree. Versions are pushed up to parents when a write happens, so no snapshot re-validates the tree.
 
@@ -95,7 +95,7 @@ Every write takes one number from a global clock, and vanilla records it at two 
 - **Key versions** are stored only for keys that were written. An unwritten key reports `P`'s creation version, so memory is O(keys written).
 - **Implicit writes count.** `push` moves the new index and `length`; shrinking `length` moves every removed index.
 
-**Propagation — my reading of "on-demand subscription":**
+**Propagation: lazy parent links**
 
 - A parent links to its children the first time something needs its subtree version: `snapshot(P)`, `getVersion(P)` or a subtree `subscribe(P)`. That first pass is O(subtree), which the first snapshot pays anyway.
 - After that, a write bumps the proxy version of every linked ancestor: O(depth × parents). A later `snapshot` of an unchanged subtree is a cache hit.
@@ -268,7 +268,7 @@ The closure-getter row is the riskiest: v2's computed-properties guide itself us
 
 Questions 1 and 2 decide the architecture; the rest are API and scope details.
 
-1. **"On-demand subscription":** did you mean parent links created on first demand, as in the Vanilla section? Or on-demand materialization in React (Option B), or something else?
+1. **"On-demand subscription":** which mechanism did you mean? The #1160 shape has three distinct costs: (i) per-key listeners, so a write notifies only that key's subscribers; (ii) installing listeners only for keys a render read; (iii) building the N-key snapshot on each write, where lazy parent links (Vanilla section) remove the version walk and Option B removes the rebuild. Option A covers (i) and (ii). How much of (iii) is in scope?
 2. **Wide-node rebuild:** is Option A acceptable for this branch? It rebuilds an N-key node on each re-render (4.3 ms at N = 5,000), with Option B as a follow-up. Or must #1160's wide node be O(1) now?
 3. **Key subscription shape:** (a) `subscribe(p, cb, { key })`, (b) `subscribeKey` in core, or (c) a new raw export?
 4. **Own-keys signal shape:** a vanilla-exported sentinel key, accepted by the key subscription and `getVersion(p, key)`, or a separate option?
