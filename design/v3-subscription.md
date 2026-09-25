@@ -45,11 +45,11 @@ Each proxy has:
 - direct-key listeners
 - an own-keys listener
 
-A direct-key listener hears `set` and `delete` of that key on that object. It does not hear a sibling, and it does not hear a write under a child. An own-keys listener hears an own key added, removed, or reordered. It does not hear a value write. A subtree listener hears every write in the subtree.
+A direct-key listener hears `set` and `delete` of that key on that object. It does not hear a sibling, and it does not hear a write under a child. An own-keys listener hears an own key added or removed. It does not hear a value write. Replacing `state.items[id]` leaves the key list unchanged, so a list parent that read `Object.keys` stays quiet. A subtree listener hears every write in the subtree.
 
 Registering any of the three is O(1). A subtree listener does not attach itself to current children at subscribe time. Each proxy records its parents the first time something needs the subtree: `snapshot`, `getVersion`, or a subtree `subscribe`. A write then walks that parent chain. The first snapshot already pays for the linking pass. Listeners left on a replaced child stay silent. The render that hears the parent key drops them.
 
-`set` of an `Object.is` value notifies nobody. `delete` of a missing own property notifies nobody. An index write that changes `length` notifies that index and `'length'`. Replacing a child notifies the parent key, the parent's own-keys listener, and the parent's subtree listeners.
+`set` of an `Object.is` value notifies nobody. `delete` of a missing own property notifies nobody. An index write that changes `length` notifies that index and `'length'`, and the own-keys listener, because an index appeared or disappeared. Replacing a child that is already an own key notifies that key and the subtree listeners. It does not notify the own-keys listener.
 
 ```js
 subscribe(proxyObject, callback)
@@ -159,7 +159,7 @@ The tracking proxy records reads during render and does not subscribe. `useSyncE
 | Read | Recorded at read time | Subscription |
 | --- | --- | --- |
 | nothing | | none |
-| `tracked.count` when the value is not a child proxy | the value | key `count` |
+| `tracked.count` when the value is not a child proxy | the snapshot value the render returned, `S[count]` | key `count` |
 | `tracked.nested.count` | the child proxy at `nested`, and the value of `count` | key `nested` on the parent, and key `count` on that child |
 | `tracked.nested` and no property of it | the child snapshot | key `nested` on the parent, and a subtree listener on the child |
 | `trackKey(tracked.obj)` while also reading a leaf | the child snapshot, plus the leaf | subtree listener on `obj`, plus the leaf's key |
@@ -193,9 +193,11 @@ Keys from earlier commits are already listening through this render. Two writes 
 - A child layout effect runs before the parent's, so it can write a key this render read for the first time.
 - A layout effect registered before `useSnapshot` in the same component runs first for the same reason.
 
-The check compares only those newly recorded facts, against the raw proxy:
+The recorded leaf is the snapshot value the render showed, not a read of the raw proxy at that moment. A prop-change re-render can reuse a held snapshot that is already behind live state for a key nobody has subscribed to yet. Recording the live value would make the check pass while the screen still shows the stale snapshot.
 
-- a leaf value, with `Object.is`
+The check compares those recorded facts with the raw proxy:
+
+- a leaf value, with `Object.is` against the recorded snapshot value
 - a path, by whether `P[k]` is still the child proxy recorded at read time
 - a container, by whether `snapshot(child) ===` the snapshot the render saw
 - presence, for `in` and `hasOwn`
@@ -234,11 +236,11 @@ Enumeration tests that ignore value-only writes stay, because of `{ ownKeys: tru
 
 ### Same snapshot, new snapshot
 
-Records follow the snapshot identity that produced them, which is the v2 `affected` rule. The render writes them on an object that render created. Only the layout effect of the render that committed copies them into the subscribed set.
+Records follow the snapshot identity that produced them, which is the v2 `affected` rule. The layout effect installs the pending set when a render with a new snapshot commits. Late reads add to the set that is already installed.
 
 - A new snapshot starts a fresh read set. A component that stops reading `a` and reads `b` drops `a`.
 - A React re-render that sees the same snapshot accumulates. A prop change or a local `setState` must not forget keys read on that snapshot.
-- A suspended render does not replace the committed read set.
+- A suspended render does not replace the committed read set. A late read can still add to it.
 
 ## Public API
 
