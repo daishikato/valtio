@@ -55,7 +55,7 @@ All notifications, batched or not, go through one delivery loop.
 The pieces:
 
 - **Listener:** records its subscription in `pending`, and appends the op only when ops are enabled. With ops off, the callback receives `[]`, never `[undefined]`.
-- **Write:** each write is delivered like a batch of one. The proxy's notify step raises `depth` while it runs its listeners, so every subscription the write notifies is queued first. It then runs the loop when it is outermost and something is pending.
+- **Write:** each write is delivered like a batch of one. The proxy's notify step raises `depth` while it runs its listeners, so every subscription the write notifies is queued first. It then runs the loop only when `depth` is back to 0, no loop is running, and something is pending. A write made by a callback therefore never starts a loop of its own; it is queued for the next round.
 - **Loop:** swaps `pending` for a fresh map, runs each still-active subscription with its ops while collecting errors, and repeats until the fresh map stays empty. Then it throws as described above.
 - **`batch`:** increments `depth`, runs `fn`, and decrements in `finally`. It runs the loop only when `depth` is back to 0 and no loop is running.
 
