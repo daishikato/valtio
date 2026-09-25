@@ -33,7 +33,7 @@ All notifications, batched or not, go through one delivery loop.
 
 - **Rounds.** A round runs every pending subscription once, in the order each was first notified.
 - **Writes made by callbacks** are queued for the next round, not delivered inside the current one. Every subscriber therefore sees writes in order, and a subscriber that hasn't received its batched ops yet can't see a later write first.
-- **One loop at a time.** A `batch()` called from a callback joins the running loop instead of starting another.
+- **One loop at a time.** A `batch()` called from a callback joins the running loop instead of starting another. That `batch()` therefore returns before its listeners run. They run in the next round, still before the outermost write or `batch` returns.
 - **Timing.** The loop ends when a round leaves nothing pending, still before the outermost write or `batch` returns.
 
 **Errors**
@@ -146,7 +146,7 @@ Measured on `v3` at `fb594a1` with vitest, jsdom and a React 19.2.5 dev build, u
   - one callback with every op, in order
 - Delivery order:
   - A callback that writes doesn't let a later write reach another subscriber before its batched ops.
-  - A `batch` inside a callback joins the running loop.
+  - A `batch` inside a callback joins the running loop. It returns before its listeners run, and they run before the outermost write or `batch` returns.
 - Errors:
   - Several throwing callbacks produce one `AggregateError`, and the remaining subscribers still run.
   - A throwing `fn` alone is rethrown unchanged.
