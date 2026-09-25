@@ -55,7 +55,8 @@ These are the decisions the design needs from you. Each one states the proposed 
    - Proposed: document the [item-hook pattern](#the-item-hook-pattern). It uses public APIs only.
    - Alternative: ship the recipe as a small hook in `valtio/react/utils`. It adds no vanilla API, but it is one more export.
    - Alternative: `useSnapshot` subscribes itself to the parent key that currently points at its proxy. That needs a new public vanilla signal, because parent links are internal. It also helps only components that re-derive the proxy during render.
-8. **Your remaining preferences**, major and minor.
+8. **Changed-keys shape:** `{ keys: true }` for every direct key, and the changed keys as the callback argument of key-level subscriptions. See [Dropping ops](#dropping-ops).
+9. **Your remaining preferences**, major and minor.
 
 ### Decided
 
@@ -66,6 +67,7 @@ These are the decisions the design needs from you. Each one states the proposed 
 - PR b removes `getVersion`.
 - `batch(fn)` returns `fn`'s result, subscriber errors are thrown as an `AggregateError` after delivery finishes, and `subscribeInAsync` is not added.
 - `snapshot()` keeps its semantics. React renders only immutable snapshots, which is what makes Valtio safe under concurrent rendering.
+- Ops and `unstable_enableOp` are removed, with a replacement that keeps valtio-yjs and valtio-y working ([Dropping ops](#dropping-ops)).
 
 **Assumptions from your earlier messages, to confirm:**
 
@@ -146,17 +148,17 @@ The parent must not pass `snap.items[id]` without reading it. Under the containe
 
 Each step is its own PR into `v3`, reviewed and merged before the next one starts. `v3` is unreleased, so an interim state between PRs never ships.
 
-| PR  | Scope                                                                                                         | Needs       | Notes                                                                                                                                          |
-| --- | ------------------------------------------------------------------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| a   | Sync-only notifications and `batch()`                                                                         | —           | [Design note](./v3-sync-notifications.md). `useSnapshot` takes a snapshot per unbatched write until d5                                         |
-| b   | `isProxyObject` and `unstable_isRef`; remove `getVersion`                                                     | a           | Utils stop reading `unstable_getInternalStates` where these suffice. PR a provides the sync-`subscribe` path for change detection              |
-| c   | Embed proxy-compare, dropping what Valtio doesn't use                                                         | —           | No behavior change. `valtio/react` re-exports `getUntracked` and `trackMemo`. Vanilla still calls the in-tree `markToTrack` and `getUntracked` |
-| d1  | Lazy parent links                                                                                             | —           | No API change; `snapshot()` stops walking the tree                                                                                             |
-| d2  | `subscribe(p, cb, { keys, ownKeys })`, an O(1) `subscribeKey`, and no notification for deleting an absent key | a           |                                                                                                                                                |
-| d3  | Snapshot semantics: live getters, the brand, the assignment error                                             | c           | Removes vanilla's `getUntracked` unwrap. `deepClone` skips the brand, and the embedded tracker forwards it without recording it                |
-| d4  | Collections keep their index in state                                                                         | a           |                                                                                                                                                |
-| d6  | `applyChanges`                                                                                                | a, d3       | Lands before d5, so the quiet path for replacement exists before the equal-replacement break                                                   |
-| d5  | The React switch: new tracker, `trackKey`, counter-based `getSnapshot`                                        | b, c, d1–d4 | Removes the embedded `isChanged` path, the `getUntracked` and `trackMemo` re-exports, and vanilla's `markToTrack` call                         |
+| PR  | Scope                                                                                                                                                  | Needs       | Notes                                                                                                                                          |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| a   | Sync-only notifications and `batch()`                                                                                                                  | —           | [Design note](./v3-sync-notifications.md). `useSnapshot` takes a snapshot per unbatched write until d5                                         |
+| b   | `isProxyObject` and `unstable_isRef`; remove `getVersion`                                                                                              | a           | Utils stop reading `unstable_getInternalStates` where these suffice. PR a provides the sync-`subscribe` path for change detection              |
+| c   | Embed proxy-compare, dropping what Valtio doesn't use                                                                                                  | —           | No behavior change. `valtio/react` re-exports `getUntracked` and `trackMemo`. Vanilla still calls the in-tree `markToTrack` and `getUntracked` |
+| d1  | Lazy parent links                                                                                                                                      | —           | No API change; `snapshot()` stops walking the tree                                                                                             |
+| d2  | `subscribe(p, cb, { keys, ownKeys })`, an O(1) `subscribeKey`, and no notification for deleting an absent key. Ops and `unstable_enableOp` are removed | a           | Key-level callbacks receive the changed keys ([Dropping ops](#dropping-ops)). `devtools` names actions from a snapshot diff                    |
+| d3  | Snapshot semantics: live getters, the brand, the assignment error                                                                                      | c           | Removes vanilla's `getUntracked` unwrap. `deepClone` skips the brand, and the embedded tracker forwards it without recording it                |
+| d4  | Collections keep their index in state                                                                                                                  | a           |                                                                                                                                                |
+| d6  | `applyChanges`                                                                                                                                         | a, d3       | Lands before d5, so the quiet path for replacement exists before the equal-replacement break                                                   |
+| d5  | The React switch: new tracker, `trackKey`, counter-based `getSnapshot`                                                                                 | b, c, d1–d4 | Removes the embedded `isChanged` path, the `getUntracked` and `trackMemo` re-exports, and vanilla's `markToTrack` call                         |
 
 Each PR updates the docs for what it changes. A final pass assembles the migration guide and documents the item-hook pattern. Tests from the WIP branches are ported into the PR whose behavior they cover.
 
@@ -194,7 +196,7 @@ subscribe(p, callback, { ownKeys: true }) // an own key of p added or removed
 | `ownKeys` | An own key added or removed, including an index that appears or disappears through `length` | Value writes; replacing a child under an existing key | O(1)              |
 
 - `keys` and `ownKeys` combine in one call. React makes one registration per proxy it read.
-- Every listener is synchronous. Inside `batch()`, it is deferred until the outermost `batch` returns and then runs once with the accumulated ops. State is visible to reads immediately; nested `batch` calls join the outer one.
+- Every listener is synchronous. Inside `batch()`, it is deferred until the outermost `batch` returns and then runs once. State is visible to reads immediately; nested `batch` calls join the outer one.
 - A same-value `set`, or a `delete` of an absent key, notifies nobody.
 - Replacing `state.child` notifies `state`'s `child` key and its subtree listeners. The old child's own listeners stay silent, because it was detached rather than mutated.
 - `subscribeKey(p, key, cb)` in utils becomes a key subscription plus its existing `Object.is` value filter, so existing callers see no change. A nested write under `p[key]` still doesn't call it, now because the key listener doesn't fire rather than because of the filter. That makes it O(1), the goal of #1161. React does not use it: the filter hides an `undefined` key appearing or disappearing.
@@ -205,6 +207,27 @@ subscribe(p, callback, { ownKeys: true }) // an own key of p added or removed
   - It is false for snapshots, plain objects, and ref'd non-proxies.
   - A proxy passed through `ref()` is still a proxy, so both predicates are true for it.
 - **`unstable_isRef(x)`** reads today's global ref mark. It stays `unstable_` because scoped `ref` could change what "is a ref" means.
+
+### Dropping ops
+
+Decided: ops and `unstable_enableOp` are removed. Ops cost a path array per write at every ancestor, and only three consumers read them:
+
+| Consumer         | Reads from ops                                                                                                 | Without ops                                                                                                                                      |
+| ---------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `devtools`       | Action names such as `set:todos.0.done`                                                                        | Diff the previous snapshot against the current one. `devtools` already takes a snapshot for every message, and identity skips unchanged subtrees |
+| valtio-y 1.1.3   | For each container proxy, the direct keys set or deleted, including array indices and `length`                 | The changed direct keys, below. Values come from the proxy, and previous values from the Y type                                                  |
+| valtio-yjs 0.7.0 | Nested paths from one root subscription, and array op sequences with new and previous values to detect inserts | Per-container subscriptions with changed keys, as valtio-y does, plus an array diff against the `Y.Array`                                        |
+
+Proposal, landing in d2 with the key-level subscriptions:
+
+- `subscribe(p, cb)` calls `cb()` with no arguments.
+- A key-level subscription passes the direct keys that changed since its last call, each once: `subscribe(p, (keys) => …, { keys: ['a', 'b'] })`. `{ keys: true }` hears every direct key of `p`.
+- A binding reads the current value from the proxy, and treats a key that is no longer `in p` as deleted. Inside `batch`, a key written several times is reported once, and the proxy already holds its final value.
+- For arrays, the changed keys are indices and `length`. A binding turns them into inserts and deletes by diffing against its own mirror, for example from the common prefix and suffix, instead of reconstructing them from op sequences.
+- With no new API at all, a binding can instead diff consecutive snapshots. That costs O(width) of each changed container per notification, where changed keys cost O(changed keys).
+- Detection (R2): passing a callback that declares a parameter to `subscribe(p, cb)` is a TypeScript error, and importing `unstable_enableOp` fails.
+
+Both packages need a v3 release anyway: valtio-y passes `true` as `subscribe`'s third argument, which PR a makes throw, and valtio-yjs calls `getVersion`, which PR b removes.
 
 ## Snapshots
 
@@ -375,14 +398,15 @@ A tracked snapshot passed as `next` from an event handler records late reads, an
 
 **`valtio` / `valtio/vanilla`**
 
-| Export                       | Change                                                                                                                          |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `subscribe(p, cb, options?)` | The boolean third argument throws; `{ keys, ownKeys }` replaces it                                                              |
-| `batch(fn)`                  | New, in PR a                                                                                                                    |
-| `isProxyObject(x)`           | New                                                                                                                             |
-| `unstable_isRef(x)`          | New                                                                                                                             |
-| `getVersion(p)`              | Removed in PR b. Use `isProxyObject(x)` for proxy checks, and `snapshot(p)` identity or a `subscribe` flag for change detection |
-| `unstable_getInternalStates` | Gains the snapshot brand, for `deepClone` and `applyChanges`; other contents change                                             |
+| Export                       | Change                                                                                                                                         |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `subscribe(p, cb, options?)` | The boolean third argument throws; `{ keys, ownKeys }` replaces it. The callback receives no ops; key-level callbacks receive the changed keys |
+| `batch(fn)`                  | New, in PR a                                                                                                                                   |
+| `isProxyObject(x)`           | New                                                                                                                                            |
+| `unstable_isRef(x)`          | New                                                                                                                                            |
+| `getVersion(p)`              | Removed in PR b. Use `isProxyObject(x)` for proxy checks, and `snapshot(p)` identity or a `subscribe` flag for change detection                |
+| `unstable_getInternalStates` | Gains the snapshot brand, for `deepClone` and `applyChanges`; other contents change                                                            |
+| `unstable_enableOp`          | Removed in d2                                                                                                                                  |
 
 **`valtio/react`**
 
@@ -416,6 +440,7 @@ A tracked snapshot passed as `next` from an event handler records late reads, an
 | `subscribe` callbacks run synchronously on every write, instead of once per microtask | Docs                                       | `batch()`, or coalesce in the callback ([recipe](./v3-sync-notifications.md#migration))                |
 | `subscribe(p, cb, true)`, `subscribeKey(…, true)`                                     | TypeScript error; runtime error (1)        | Drop it; use `batch()` to group notifications                                                          |
 | `getVersion` removed                                                                  | TypeScript error; import error             | `isProxyObject(x)` for proxy checks; `snapshot(p)` identity or a `subscribe` flag for change detection |
+| Ops and `unstable_enableOp` removed                                                   | TypeScript error; import error             | Key-level subscriptions with changed keys; or diff snapshots                                           |
 | `useSnapshot(p, { sync })`, `useProxy(p, { sync })`                                   | TypeScript error; runtime error (2)        | Drop it                                                                                                |
 | A snapshot or tracked snapshot assigned into state, or passed to `proxy()`            | Runtime error (3)                          | `deepClone`, `applyChanges`, or `ref`                                                                  |
 | An own setter called on a snapshot                                                    | Runtime `TypeError` in strict mode         | Write to the proxy                                                                                     |
