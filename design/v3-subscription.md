@@ -160,7 +160,7 @@ The tracking proxy records reads during render and does not subscribe. `useSyncE
 | --- | --- | --- |
 | nothing | | none |
 | `tracked.count` when the value is not a child proxy | the snapshot value the render returned, `S[count]` | key `count` |
-| `tracked.nested.count` | the child proxy at `nested`, and the value of `count` | key `nested` on the parent, and key `count` on that child |
+| `tracked.nested.count` | the child proxy at `nested`, and the snapshot value of `count` | key `nested` on the parent, and key `count` on that child |
 | `tracked.nested` and no property of it | the child snapshot | key `nested` on the parent, and a subtree listener on the child |
 | `trackKey(tracked.obj)` while also reading a leaf | the child snapshot, plus the leaf | subtree listener on `obj`, plus the leaf's key |
 | getter | the reads it makes through `this` | those reads, not the owning object |
