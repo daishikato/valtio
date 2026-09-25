@@ -55,7 +55,7 @@ These are the decisions the design needs from you. Each one states the proposed 
    - Proposed: document the [item-hook pattern](#the-item-hook-pattern). It uses public APIs only.
    - Alternative: ship the recipe as a small hook in `valtio/react/utils`. It adds no vanilla API, but it is one more export.
    - Alternative: `useSnapshot` subscribes itself to the parent key that currently points at its proxy. That needs a new public vanilla signal, because parent links are internal. It also helps only components that re-derive the proxy during render.
-8. **Changed-keys shape:** `{ keys: true }` for every direct key, and the changed keys as the callback argument of key-level subscriptions. The reviewer checked it against valtio-y 1.1.3 and valtio-yjs 0.7.0 and agrees it is enough for both. See [Dropping ops](#dropping-ops).
+8. **Changed-keys shape:** `{ keys: true }` for every direct key, and the changed keys as the callback argument of key-level subscriptions. The reviewer checked it against valtio-y 1.1.3 and valtio-yjs 0.7.0 and agrees it is enough for both. One cost: when an array holds equal primitives, the index of an insert cannot be recovered, so a concurrent insert can land at a different position. See [Dropping ops](#dropping-ops).
 9. **Your remaining preferences**, major and minor.
 
 ### Decided
@@ -242,7 +242,7 @@ Proposal, landing in d2 with the key-level subscriptions:
 - Nested containers are matched by identity: the proxy bound to each Y item. Primitives are matched by value. Matching containers by deep equality, as valtio-yjs does today, can bind an existing Y item to a new, equal object.
 - A common prefix and suffix is a fast path for one contiguous edit, such as `push`, `pop` or a single `splice`. Several edit regions in one batch, such as `sort` or two splices, need the full diff. Rewriting the middle instead gives the items new Yjs identities and drops concurrent edits to them, which is what valtio-yjs's `parseProxyOps` exists to avoid.
   - The fast path is safe only when the two middles left after the prefix and suffix share no match. A shared match means the full diff.
-- Equal primitives are ambiguous. Inserting `a` into `[a, a, a]` gives `[a, a, a, a]` whether it went in at 0 or at the end, so no diff can recover the index. The local array is correct either way, but a concurrent insert can land at a different position than the original `splice` would have given. Containers matched by identity have no such ambiguity. This is the cost of dropping the op stream, and it is accepted.
+- Equal primitives are ambiguous. Inserting `a` into `[a, a, a]` gives `[a, a, a, a]` whether it went in at 0 or at the end, so no diff can recover the index. The local array is correct either way, but a concurrent insert can land at a different position than the original `splice` would have given. Containers matched by identity have no such ambiguity. This is the cost of dropping the op stream. Proposed: accept it (Q8).
 
 **`devtools`** names `set:` and `delete:` paths by diffing the previous snapshot against the current one. It already keeps the previous snapshot for each message.
 
