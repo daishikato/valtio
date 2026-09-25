@@ -44,7 +44,7 @@ All notifications, batched or not, go through one delivery loop.
   - If only `fn` threw, `batch` rethrows that error unchanged, after delivering the notifications for the writes it made.
   - If `fn` and callbacks both threw, the `AggregateError` lists `fn`'s error first.
 
-`AggregateError` is an ES2021 global. The repo's TypeScript `lib` is `ESNext` and Node is 20 or later, so neither is a concern. Support on Hermes should be confirmed before release.
+`AggregateError` is an ES2021 global. The repo's TypeScript `lib` is `ESNext` and Node is 22.12 or later, so neither is a concern. Support on Hermes should be confirmed before release.
 
 **Implementation sketch.** Module-level state:
 
