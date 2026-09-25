@@ -7,9 +7,8 @@
 - Notifications become synchronous, and the `notifyInSync` and `sync` options go away.
 - `batch()` lands in vanilla and returns `fn`'s result.
 - When subscriber callbacks throw, the delivery still finishes, and then an `AggregateError` is thrown.
+- `subscribeInAsync` is not added ([why](#not-added-subscribeinasync)).
 - In this PR, `useSnapshot` pays for a snapshot on every write that isn't batched. That cost is accepted until d5 removes it, with a `TODO` in the code and no workaround.
-
-**Proposed, to confirm:** don't add `subscribeInAsync` (see [Open question](#open-question)).
 
 ## Changes
 
@@ -162,10 +161,10 @@ Measured on `v3` at `fb594a1` with vitest, jsdom and a React 19.2.5 dev build, u
 - `how-tos/some-gotchas.mdx`: remove the controlled-input caret section, since updates are always synchronous.
 - The v3 migration guide.
 
-## Open question
+## Not added: `subscribeInAsync`
 
-**Should `subscribeInAsync` be added?** Proposed: no.
+Decided: `subscribeInAsync` is not added.
 
-- **Its only in-repo user is `devtools`,** which can coalesce with a private helper.
+- **Its only in-repo user is `devtools`,** which coalesces with a private helper.
 - **Application code has other remedies.** It can wrap multi-write code in `batch()`, or coalesce inside its callback with the recipe above.
-- **It can be added later without breaking anything,** but it could not be removed later without breaking users. Given the strict review of new exports, the smaller API is the safer default.
+- **It can be added later without breaking anything,** but it could not be removed later without breaking users.

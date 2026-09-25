@@ -45,7 +45,7 @@ These are the decisions the design needs from you. Each one states the proposed 
    - A key read only in an event handler subscribes until the snapshot changes: at most one extra render, as in v2.
 4. **New public API, for your strict review:**
    - vanilla: `subscribe` options, `batch`, `isProxyObject`, `unstable_isRef`, and `getVersion` removed (decided)
-   - utils: `applyChanges` (`subscribeInAsync` is proposed not to be added; see the [PR a note](./v3-sync-notifications.md#open-question))
+   - utils: `applyChanges`
    - react: `trackKey`
    - Also one new entry in `unstable_getInternalStates`, the brand, which `deepClone` and `applyChanges` need.
    - See [Public API](#public-api).
@@ -64,6 +64,7 @@ These are the decisions the design needs from you. Each one states the proposed 
 - Notifications are sync-only. In PR a, `useSnapshot` pays for a snapshot on every unbatched write, which is accepted with a `TODO` until d5 removes it.
 - PR c re-exports `getUntracked` and `trackMemo`; the d PRs replace them.
 - PR b removes `getVersion`.
+- `batch(fn)` returns `fn`'s result, subscriber errors are thrown as an `AggregateError` after delivery finishes, and `subscribeInAsync` is not added.
 - `snapshot()` keeps its semantics. React renders only immutable snapshots, which is what makes Valtio safe under concurrent rendering.
 
 **Assumptions from your earlier messages, to confirm:**
@@ -393,11 +394,11 @@ A tracked snapshot passed as `next` from an event handler records late reads, an
 
 **`valtio/utils`**
 
-| Export                      | Change                                                   |
-| --------------------------- | -------------------------------------------------------- |
-| `applyChanges(proxy, next)` | New                                                      |
-| `subscribeInAsync`          | Proposed not to be added; `devtools` coalesces privately |
-| `subscribeKey(p, key, cb)`  | Built on `{ keys }`; the `notifyInSync` argument throws  |
+| Export                      | Change                                                  |
+| --------------------------- | ------------------------------------------------------- |
+| `applyChanges(proxy, next)` | New                                                     |
+| `subscribeInAsync`          | Not added (decided); `devtools` coalesces privately     |
+| `subscribeKey(p, key, cb)`  | Built on `{ keys }`; the `notifyInSync` argument throws |
 
 **Not added:**
 
