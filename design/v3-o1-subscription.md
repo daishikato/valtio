@@ -31,7 +31,7 @@ The goal is fast atomic mutation. A write like `state.items[5].count++` should c
 
 These are the decisions the design needs from you. Each one states the proposed answer.
 
-1. **What "on-demand subscription" means.** The proposal reads it as "subscribe only to what a committed render read". Lazy parent links also remove the version walk. The wide-node snapshot copy stays; see Q2.
+1. **What "on-demand subscription" means.** The proposal reads it as "subscribe only to what was read against the committed snapshot", whether during render or later, for example by a child that re-renders on its own. Lazy parent links also remove the version walk. The wide-node snapshot copy stays; see Q2.
 2. **The wide-node copy.** With `useSnapshot(state)` at the root, a write still copies the O(N) object that holds the items.
    - Proposed: accept this for now, and document the [item-hook pattern](#the-item-hook-pattern), which costs O(depth + one item) per write.
    - Removing the copy for the root-hook pattern is a follow-up with a silent behavior change ([Not proposed](#not-proposed-on-demand-materialization)).
@@ -50,7 +50,10 @@ These are the decisions the design needs from you. Each one states the proposed 
 5. **Names:** `trackKey`, `ownKeys`, `subscribeInAsync`, `unstable_isRef`.
 6. **Delivery:** should lazy parent links ship as their own PR first? They are vanilla-only, change no API, and make `snapshot()` faster today.
 7. **Collections:** keep the index in state, following the `versioned-index` branch? This is proposed over a private-symbol copy of the index.
-8. **Your remaining preferences**, major and minor.
+8. **Following replacement.** `useSnapshot(state.items[id])` keeps listening to a detached item after `state.items[id]` is replaced, which is also true in v3 today. There are two options:
+   - Proposed: document the [item-hook pattern](#the-item-hook-pattern). It uses public APIs only.
+   - Alternative: `useSnapshot` subscribes itself to the parent key that currently points at its proxy. That needs a new public vanilla signal, because parent links are internal. It also helps only components that re-derive the proxy during render.
+9. **Your remaining preferences**, major and minor.
 
 **Assumptions from your earlier messages, to confirm:**
 
