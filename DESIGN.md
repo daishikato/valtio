@@ -28,24 +28,25 @@ R3 fixes a v2 violation: `src/vanilla.ts` imports `markToTrack` and `getUntracke
 
 ## Decisions so far
 
-| Topic                                   | Decision                                                                                             | Status                                    |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| `notifyInSync`                          | Removed, with `batch()` and `subscribeInAsync`, in a precursor PR into `v3`                          | Maintainer                                |
-| `isProxyObject`, `unstable_isRef`       | In this branch                                                                                       | Maintainer                                |
-| `useSnapshot` with no reads             | Subscribes to nothing; a silent, harmless change                                                     | Maintainer                                |
-| Getter caching                          | Dropped; getters are live                                                                            | Maintainer                                |
-| Snapshot symbol for the runtime error   | Allowed; kept unexported                                                                             | Maintainer; unexported by agent consensus |
-| Leaf comparison                         | None, so an equal replacement re-renders                                                             | Consensus, needs sign-off (Q3)            |
-| Key subscription shape                  | `subscribe(p, cb, { keys })` and `{ ownKeys: true }`; no `getVersion(p, key)`                        | Consensus, needs strict review (Q4)       |
-| React subscription timing               | Subscribe in the hook's layout effect, then check newly read keys; never in render                   | Consensus                                 |
-| `proxy(snapshot)`                       | Throws, like assigning a snapshot                                                                    | Consensus                                 |
-| `applyChanges` values it cannot recurse | Normal `set` semantics, except snapshots, which are cloned                                           | Consensus                                 |
-| `trackKey`, `useDebugValue` key list    | Both kept                                                                                            | Consensus                                 |
-| Dev warning for closure getters         | None; docs only                                                                                      | Consensus                                 |
-| Native array methods                    | Notify per internal write; `batch()` is the remedy                                                   | Consensus                                 |
-| Collection snapshot through a wrapper   | Fixed in this branch                                                                                 | Consensus; mechanism revised below (Q6)   |
-| Wide-node snapshot copy                 | Stays O(N) per write in this branch; on-demand materialization is a follow-up                        | Consensus, needs sign-off (Q2)            |
-| Reads in event handlers                 | Subscribe until the next commit, as in v2; this draft revises the earlier "never subscribe" position | New in this draft                         |
+| Topic                                   | Decision                                                                                       | Status                                    |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `notifyInSync`                          | Removed, with `batch()` and `subscribeInAsync`, in a precursor PR into `v3`                    | Maintainer                                |
+| `isProxyObject`, `unstable_isRef`       | In this branch                                                                                 | Maintainer                                |
+| `useSnapshot` with no reads             | Subscribes to nothing; a silent, harmless change                                               | Maintainer                                |
+| Getter caching                          | Dropped; getters are live                                                                      | Maintainer                                |
+| Snapshot symbol for the runtime error   | Allowed; kept unexported                                                                       | Maintainer; unexported by agent consensus |
+| Leaf comparison                         | None, so an equal replacement re-renders                                                       | Consensus, needs sign-off (Q3)            |
+| Key subscription shape                  | `subscribe(p, cb, { keys })` and `{ ownKeys: true }`; no `getVersion(p, key)`                  | Consensus, needs strict review (Q4)       |
+| React subscription timing               | Subscribe in the hook's layout effect, then check newly read keys; never in render             | Consensus                                 |
+| `proxy(snapshot)`                       | Throws, like assigning a snapshot                                                              | Consensus                                 |
+| `applyChanges` values it cannot recurse | Normal `set` semantics, except snapshots, which are cloned                                     | Consensus                                 |
+| `trackKey`, `useDebugValue` key list    | Both kept                                                                                      | Consensus                                 |
+| Dev warning for closure getters         | None; docs only                                                                                | Consensus                                 |
+| Native array methods                    | Notify per internal write; `batch()` is the remedy                                             | Consensus                                 |
+| Collection snapshot through a wrapper   | Fixed in this branch                                                                           | Consensus; mechanism revised below (Q6)   |
+| Wide-node snapshot copy                 | Stays O(N) per write in this branch; on-demand materialization is a follow-up                  | Consensus, needs sign-off (Q2)            |
+| Records                                 | Accumulate per held snapshot, as v3 does today                                                 | Consensus (from #2)                       |
+| Reads in event handlers                 | Subscribe until the snapshot changes, as in v2; revises the earlier "never subscribe" position | New in this draft; required by v3's tests |
 
 ## Problem analysis: where #1160's O(N) lives
 
@@ -91,7 +92,7 @@ Two PRs, in order.
 
 **PR 1 — precursor into `v3`: sync-only notifications**
 
-- Remove `notifyInSync` from `subscribe` and `subscribeKey`, and `sync` from `useSnapshot` and `useProxy`. Each removal is a TypeScript error for existing callers.
+- Remove `notifyInSync` from `subscribe` and `subscribeKey`, and `sync` from `useSnapshot` and `useProxy`. Each removal is a TypeScript error. Passing the old argument also throws at runtime with a message that names `batch()` and `subscribeInAsync`, so JavaScript users notice too, as #2 proposes.
 - Add `batch(fn)` to vanilla. Listeners are deferred until the outermost `batch` returns, then each runs once with the accumulated ops. Versions still move immediately, so `snapshot()` inside a batch sees the writes.
 - Add `subscribeInAsync` to `valtio/utils`: today's microtask-batched delivery, used by `devtools`.
 - `proxyMap` and `proxySet` wrap each method in `batch()`, and flush only after both their index and their data are updated. Native `splice` and `sort` keep notifying per internal write, because a `get` trap on every array read is the wrong cost; callers wrap them in `batch()`.
@@ -207,7 +208,7 @@ The review settled on a private symbol holding the index copy. This draft propos
 
 ## React: `useSnapshot`
 
-`useSnapshot(p)` returns a tracking proxy over a held snapshot `S` of `p`. Render records what it reads. The hook's layout effect turns the committed render's reads into subscriptions and checks the newly read ones against live state.
+`useSnapshot(p)` returns a tracking proxy over a held snapshot `S` of `p`. Reads are recorded per snapshot. The hook's layout effect turns the committed snapshot's records into subscriptions and checks the newly read ones against live state.
 
 ### Render: what a read records
 
@@ -221,28 +222,37 @@ Each tracked node wraps a snapshot object `Sₙ` and is bound to the live proxy 
 | `t.k`, an inherited non-accessor, such as `map`           | Nothing                                             | —                   | —                             |
 | `'k' in t`, `Object.hasOwn(t, k)`                         | Presence seen                                       | Key `k` on `Pₙ`     | Same presence on `Pₙ`         |
 | `Object.keys(t)`, `for...in`, spread                      | Own-key list seen                                   | `{ ownKeys: true }` | Same list on `Pₙ`             |
-| A bound node with no reads under it, or `trackKey(t, k)`  | Container: the snapshot seen                        | Subtree on `C`      | `snapshot(C) === seen`        |
+| A bound node with no reads under it, or `trackKey(t.obj)` | Container: the snapshot seen                        | Subtree on `C`      | `snapshot(C) === seen`        |
 | A snapshot's non-enumerable own symbol, such as the brand | Nothing                                             | —                   | —                             |
 
-- **Containers:** the "no reads under it" rule gives v2's identity semantics to a node that is only passed on, such as an effect dependency or a prop to a memoized child that did not re-render.
-- **`trackKey(t, k)`:** returns `t[k]` and forces a container record for it. This is the migration for `trackMemo`, where a component reads `t.obj.x` but also depends on the identity of `t.obj`.
+- **Containers:** the "no reads under it" rule gives v2's identity semantics to a node that is only passed on, such as an effect dependency or a prop to a memoized child that never rendered against this snapshot.
+- **Snapshot identity, not `getVersion(C)`,** is the container check. A version read at render time can already include a write that the held snapshot does not show, so it would pass while the render used stale data.
+- **`trackKey(t.obj)`:** forces a container record for `t.obj` and returns it. It is a drop-in for `trackMemo(t.obj)`, where a component reads `t.obj.x` but also depends on the identity of `t.obj`.
 - **Accessor keys** are never value-compared. An object-returning getter returns a new identity on each access, so comparing it would re-render forever.
-- **Reads in the same pass** go to the hook that created the tracked proxy, including reads from children, memoized or not, that render before the hook's layout effect.
 - **Tracked proxies** are cached per hook by snapshot object. An unchanged subtree keeps its identity across renders, so `memo` bails out.
 - **Dev only:** the recorded keys are listed with `useDebugValue`.
+
+### Records are kept per snapshot
+
+Every tracked node belongs to one root snapshot `S`, and a read, from any component, goes into the record set for `S`. The set grows while `S` is the held snapshot, and a new snapshot starts an empty set. This is the rule #2 proposed, and it is what v3 does today.
+
+- A re-render on the same snapshot, from a prop change or local state, keeps the keys read earlier. That includes keys read by memoized children that bail out this time. The existing test "should retain keys accessed before a prop change" covers it.
+- A read into a set that is already installed is a late read (below). This covers a child that calls no valtio hook and re-renders on its own, as in "should grow committed subscriptions during a suspended render".
+- The set for a snapshot that never commits is dropped without subscribing.
 
 ### Commit: reconcile, then check
 
 A layout effect in the hook runs after every commit and does two things:
 
-1. **Reconcile.** Diff the render's records against the installed subscriptions, add the new ones and remove the ones no longer read. This is O(changed records), and key and own-key records are grouped into one `subscribe` call per proxy.
+1. **Reconcile.** Install the set for the committed snapshot and remove subscriptions that are not in it. This is O(changed records), and key and own-key records are grouped into one `subscribe` call per proxy.
 2. **Check** the records that were not installed before this commit. If one fails, mark the held snapshot stale and schedule a sync re-render. An update scheduled in a layout effect is processed before paint.
 
 Why this is enough:
 
 - **Records installed by an earlier commit** were listening all along. Any write to them has already marked the snapshot stale.
-- **Newly read records** are what the check covers. It runs after the children's layout effects, so a child's layout-effect write to a key read for the first time in this render is on screen before paint. With a passive subscription, that write would show one frame late.
-- **A render that never commits** never reaches the effect, so it never subscribes: Strict Mode's extra render, an interrupted transition, a render that suspends. No finalization registry is needed.
+- **Newly read records** are what the check covers. It runs after the children's layout effects and after layout effects declared before `useSnapshot` in the same component. So a write from one of those to a key read for the first time is on screen before paint. With a passive subscription, that write would show one frame late.
+- **Layout effects declared after `useSnapshot`** write into listeners that are already installed. The existing test "should detect a new-key mutation before passive subscription" covers that case.
+- **A render that never commits** with a new snapshot never reaches the effect, so its set never subscribes. One that reuses the committed snapshot, such as Strict Mode's extra render or a transition that suspends, adds late reads. Those last only until the snapshot changes. Every listener belongs to the mounted hook and is removed on unmount, so no finalization registry is needed.
 - **A hidden `<Activity>`** drops all subscriptions. Showing it again reinstalls and checks every record, so writes made while it was hidden appear before the first paint.
 
 The invariant is that after each commit, the held snapshot agrees with live state on every installed record. The check establishes that for new records, and listeners maintain it for the rest. So the component re-renders when something it read changes, plus only the extra renders listed in the next section.
@@ -251,11 +261,11 @@ The invariant is that after each commit, the held snapshot agrees with live stat
 
 - **Listeners** mark the held snapshot stale and notify React. They use `useSyncExternalStore`'s callback, or a state update on mount, before that callback exists.
 - **`getSnapshot`** returns the held snapshot until it is stale, then takes `snapshot(p)` once. An unrelated write never changes what it returns, so React's consistency checks never copy the wide node.
-- **Late reads** happen outside the window from this hook's render to its layout effect. Examples are a memoized child that re-renders on its own, an effect, or an event handler.
+- **Late reads** go into a set that is already installed. They come from a child that re-renders on its own, an effect, an event handler, or a render on the committed snapshot that never commits.
   - A microtask subscribes a late read and runs the same check on it.
-  - Late reads only add subscriptions; they never narrow a container. The next commit recomputes the set from that render's reads.
-  - React offers no public way to tell a render from an event handler. So a handler's read subscribes too, and costs at most one extra render before the next commit drops it, as in v2.
-  - This revises the earlier "event handlers do not subscribe" position, which the hook cannot implement without React internals.
+  - Late reads only add subscriptions; they never narrow a container. They are dropped when the snapshot changes.
+  - React offers no public way to tell a render from an event handler, so a handler's read subscribes too. That costs at most one extra render: the next write to that key replaces the snapshot, and the new set drops the key. v2 behaves the same.
+  - This revises the earlier "event handlers do not subscribe" position. The hook cannot implement it without React internals, and the existing suspended-render test needs late reads from a child that calls no valtio hook.
 
 ### Limits
 
@@ -275,7 +285,7 @@ B needs no vanilla API beyond this design's, so the vanilla design does not depe
 
 ## React: what users see, and which tests change
 
-Dropping leaf comparison costs one tested behavior: replacing a child with equal leaves now re-renders. The other test changes follow from decisions already made.
+Dropping leaf comparison costs one tested behavior: replacing a child with equal leaves now re-renders. Using key listeners for `in` and `hasOwn` costs two more: a value-only write now re-renders those readers. The other test changes follow from decisions already made.
 
 **Extra renders.** All are silent and harmless, which R2 allows.
 
@@ -284,7 +294,7 @@ Dropping leaf comparison costs one tested behavior: replacing a child with equal
 | Replacing a read child with equal used leaves, e.g. `state.data = await res.json()`    | No render | Render                      |
 | A getter's result is unchanged but its input changed, e.g. `isEven` after `count += 2` | No render | Render                      |
 | `'k' in t` or `Object.hasOwn(t, k)`, then `k`'s value changes                          | No render | Render                      |
-| A key read only in an event handler changes before the next commit                     | Render    | Render (unchanged)          |
+| A key read only in an event handler later changes                                      | Render    | Render (unchanged)          |
 | A `proxyMap` value-only `set` with `has()` readers                                     | Render    | No render (collections fix) |
 
 The first row is the fetch-and-replace pattern. Its v3 remedy is `applyChanges(state.data, await res.json())`, documented in the migration guide.
@@ -297,9 +307,16 @@ The first row is the fetch-and-replace pattern. Its v3 remedy is `applyChanges(s
 | `optimization`: "should unwrap nested snapshots assigned outside render" | The assignment now throws                              | Snapshot brand     |
 | `getter`: "simple object getters", "object getters returning object"     | The getter runs on every access, not once per snapshot | Live getters       |
 | `vanilla/snapshot`: proxy-compare interop                                | proxy-compare is removed                               | R3                 |
+| `optimization`: "should track property existence with the in operator"   | A value-only write re-renders an `in` reader           | Key listeners      |
+| `optimization`: "should track own-property checks"                       | A value-only write re-renders a `hasOwn` reader        | Key listeners      |
 | Tests passing `notifyInSync` or `{ sync: true }`                         | They drop the argument                                 | PR 1               |
 
-"should track property enumeration" keeps passing because of `{ ownKeys: true }`.
+"should track property enumeration" keeps passing because of `{ ownKeys: true }`. The design relies on four existing tests that keep passing:
+
+- "should retain keys accessed before a prop change"
+- "should detect a new-key mutation before passive subscription"
+- "should keep committed subscriptions during a suspended render"
+- "should grow committed subscriptions during a suspended render"
 
 ## `applyChanges`
 
@@ -325,7 +342,7 @@ Every break that changes correctness surfaces as a TypeScript or runtime error, 
 
 | v2 → v3 change                                                                    | Detection                          | Remedy                                  |
 | --------------------------------------------------------------------------------- | ---------------------------------- | --------------------------------------- |
-| `notifyInSync` and `sync` removed (PR 1)                                          | TypeScript error                   | Remove the argument; use `batch()`      |
+| `notifyInSync` and `sync` removed (PR 1)                                          | TypeScript and runtime error       | Remove the argument; use `batch()`      |
 | A snapshot or tracked snapshot assigned into state, or passed to `proxy()`        | Runtime `TypeError` (brand)        | `deepClone`, `applyChanges`, or `ref`   |
 | An own setter called on a snapshot                                                | Runtime `TypeError` in strict mode | Write to the proxy                      |
 | `Object.freeze` on a snapshot, then `useSnapshot`                                 | Runtime error                      | Don't freeze snapshots                  |
@@ -358,7 +375,7 @@ Each item becomes a test in the commit whose behavior it covers.
   - A later self-render that reads new keys.
   - A parent re-render where the child bails out.
   - No update is missed in any of them.
-- **Event-handler reads:** at most one extra render, dropped at the next commit.
+- **Event-handler reads:** at most one extra render, then dropped with the snapshot.
 - **Precision:**
   - A list parent stays quiet on item value writes.
   - `in` on a missing key re-renders when the key is added.
@@ -389,7 +406,7 @@ Q1 and Q2 decide scope. Q3 and Q4 are the sign-offs the consensus rows above nee
    - equal replacement re-rendering
    - live, uncached getters, with closure reads untracked
    - `proxy(snapshot)` and snapshot assignment throwing
-   - event-handler reads subscribing until the next commit
+   - event-handler reads subscribing until the snapshot changes
 4. **API, strict review:**
    - In vanilla: `{ keys }`, `{ ownKeys: true }`, `isProxyObject`, `unstable_isRef` and `batch`, plus the brand entry in `unstable_getInternalStates`.
    - In utils: `subscribeInAsync` and `applyChanges`.
