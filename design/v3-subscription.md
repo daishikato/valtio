@@ -178,9 +178,11 @@ An accessor is not value-compared. An object-returning getter has a new identity
 
 No read installs no listener. `useSnapshot(state.obj)` used only as a boolean does not re-render.
 
-Reads from children in the same pass, before this hook's layout effect, belong to this render's records. A later read on the same tracked proxy is a late read: a memoized child that renders on its own, an effect, or an event handler. React has no public way to tell those apart. A microtask subscribes a late read and runs the same check. Late reads only add subscriptions. The next commit of this hook rebuilds the set from that render's reads, so a key read only in a handler costs at most one extra render and is then dropped.
+Records accumulate on the held snapshot. A read into a set that is already installed is a late read. That includes an effect, an event handler, and a child that calls no valtio hook and re-renders on its own. The suspended-render test is that last case: the parent suspends, the previous child is still on screen, and `tracked.b` read from that child's local state has to subscribe even though the parent never commits. The child has no layout effect of ours.
 
-The microtask subscribes only for a hook that has committed. A read during a render that is still in progress is part of that render's records, and a render that never commits leaves no listener. Same-pass children are that case. The microtask is for a read that happens after the layout effect.
+A microtask subscribes a late read and runs the same check. Late reads only add listeners. They do not remove a container listener. They are dropped when the held snapshot changes and the new render did not record them. A handler-only key therefore costs at most one extra render.
+
+A render that is still in progress writes a pending set for a new snapshot, and that set is installed only if the render commits. A suspended render does not open a window that stays open. The previous installed set remains, which is what keeps `tracked.a` alive in "should keep committed subscriptions during a suspended render", and what lets the child grow it in "should grow committed subscriptions during a suspended render". There is no public React signal that would subscribe the child and skip the handler.
 
 ### `getSnapshot`
 
@@ -292,4 +294,4 @@ Not added: a key argument on `getVersion`, a public snapshot symbol, a sentinel 
 | `trackMemo` from proxy-compare | `trackKey` |
 | `Object.keys` / `for...in` on a list parent | still ignores value writes |
 | `'k' in tracked` | also re-renders when the value changes |
-| a key read only from an event handler | at most one extra render, then the subscription is dropped |
+| a key read only from an event handler | at most one extra render; the subscription drops when the snapshot changes |
