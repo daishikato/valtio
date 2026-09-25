@@ -13,7 +13,7 @@ The goal is fast atomic mutation. A write like `state.items[5].count++` should c
   - A write pushes versions up to linked parents, so `snapshot()` stops walking the whole tree.
   - New exports: `batch`, `isProxyObject`, `unstable_isRef`.
 - **React**
-  - `useSnapshot` subscribes, in its layout effect, to exactly the keys that were read against the committed snapshot.
+  - `useSnapshot` subscribes to the keys read against the committed snapshot: in its layout effect for reads made during render, and in a microtask for reads made later.
   - Keys read for the first time are checked against live state before paint.
   - There is no leaf comparison otherwise. React needs only `snapshot`, `subscribe` and `isProxyObject` from vanilla, and proxy-compare is removed.
 - **Snapshots**
@@ -33,7 +33,7 @@ These are the decisions the design needs from you. Each one states the proposed 
 
 1. **What "on-demand subscription" means.** The proposal reads it as "subscribe only to what a committed render read". Lazy parent links also remove the version walk. The wide-node snapshot copy stays; see Q2.
 2. **The wide-node copy.** With `useSnapshot(state)` at the root, a write still copies the O(N) object that holds the items.
-   - Proposed: accept this for now, and document the item-hook pattern, `useSnapshot(state.items[id])`, which costs O(depth + one item) per write.
+   - Proposed: accept this for now, and document the [item-hook pattern](#the-item-hook-pattern), which costs O(depth + one item) per write.
    - Removing the copy for the root-hook pattern is a follow-up with a silent behavior change ([Not proposed](#not-proposed-on-demand-materialization)).
 3. **Breaking changes.** Each is proposed as listed in [Migration](#migration):
    - Replacing a read object with an equal one re-renders (#1162); `applyChanges` is the quiet path.
@@ -99,10 +99,32 @@ These are medians of 15 writes, measured with vitest and jsdom on a React 19 dev
 
 **Where the hook is called decides the rest.** The table below is analysis, not measurement; the [validation plan](#validation-plan) measures it.
 
-| Per leaf write                                                                                                 | v3 today                                                                        | This design                            |
-| -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------- |
-| **Root hook:** each item calls `useSnapshot(state)` and reads `items[id].count`                                | N components woken, one O(N) copy                                               | 1 component woken, one O(N) copy       |
-| **Item hook:** each item calls `useSnapshot(state.items[id])`; the list parent reads `Object.keys(snap.items)` | 2 components woken; the list parent snapshots `items` (O(N)) and then bails out | 1 component woken, O(keys of one item) |
+| Per leaf write                                                                                                                           | v3 today                                                                        | This design                            |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------- |
+| **Root hook:** each item calls `useSnapshot(state)` and reads `items[id].count`                                                          | N components woken, one O(N) copy                                               | 1 component woken, one O(N) copy       |
+| **Item hook:** each item subscribes to its own key and calls `useSnapshot` on that item; the list parent reads `Object.keys(snap.items)` | 2 components woken; the list parent snapshots `items` (O(N)) and then bails out | 1 component woken, O(keys of one item) |
+
+### The item-hook pattern
+
+Calling `useSnapshot(state.items[id])` alone is not enough. After `state.items[id] = next`, the hook still listens to the detached proxy. The list parent doesn't hear the replacement either, because the key list is unchanged. The item then keeps rendering the old object. v3 has the same gap today.
+
+The item also has to follow its key on the parent. With `{ keys }`, public APIs are enough, and no new export is needed:
+
+```js
+const useItem = (parent, key) => {
+  const item = useSyncExternalStore(
+    useCallback((cb) => subscribe(parent, cb, { keys: [key] }), [parent, key]),
+    () => parent[key],
+  )
+  return useSnapshot(item)
+}
+```
+
+- A leaf write wakes only that item's hook and snapshots only that item.
+- Replacing `state.items[id]` wakes only that item, which switches to the new proxy.
+- Adding or removing a key wakes the list parent through `{ ownKeys: true }`, which takes one O(N) snapshot of `items`.
+
+The parent must not pass `snap.items[id]` without reading it. Under the container rule, that subscribes the parent to the whole item and wakes it on every leaf write.
 
 ## Delivery plan
 
@@ -122,7 +144,7 @@ These are medians of 15 writes, measured with vitest and jsdom on a React 19 dev
 5. Utils: collections keep their index in state.
 6. React: the new tracker and `trackKey`, and removal of proxy-compare.
 7. Utils: `applyChanges`.
-8. Docs: migration guide, API pages, and the item-hook pattern for large collections.
+8. Docs: migration guide, API pages, and the item-hook pattern for large collections, including replacement.
 
 Tests from the WIP branches are ported into the commit whose behavior they cover.
 
@@ -163,7 +185,7 @@ subscribe(p, callback, { ownKeys: true }) // an own key of p added or removed
 - Every listener is synchronous. Inside `batch()`, it is deferred until the outermost `batch` returns and then runs once with the accumulated ops. State is visible to reads immediately; nested `batch` calls join the outer one.
 - A same-value `set`, or a `delete` of an absent key, notifies nobody.
 - Replacing `state.child` notifies `state`'s `child` key and its subtree listeners. The old child's own listeners stay silent, because it was detached rather than mutated.
-- `subscribeKey(p, key, cb)` in utils becomes a key subscription plus its existing `Object.is` value filter. That makes it O(1), the goal of #1161. React does not use it: the filter hides an `undefined` key appearing or disappearing.
+- `subscribeKey(p, key, cb)` in utils becomes a key subscription plus its existing `Object.is` value filter, so existing callers see no change. A nested write under `p[key]` still doesn't call it, now because the key listener doesn't fire rather than because of the filter. That makes it O(1), the goal of #1161. React does not use it: the filter hides an `undefined` key appearing or disappearing.
 
 ### `isProxyObject` and `unstable_isRef`
 
@@ -420,7 +442,8 @@ Each item becomes a test in the commit it covers.
 
 - **#1160 benchmark**, committed this time. It covers both component patterns at N = 1,000, 5,000 and 50,000, and reports components woken, write-to-commit time, and `snapshot` calls per write.
 - **Render→commit gaps.** A child's layout effect, and a later sibling's, each write a key first read in this render. Both writes are in the DOM before the passive phase.
-- **Renders that never commit**: Strict Mode, an interrupted transition, and a render that suspends. None of them leaves a listener for a new snapshot.
+- **Renders that never commit**: Strict Mode, an interrupted transition, and a render that suspends. A render that took a new snapshot leaves no listener behind. A render on the committed snapshot adds only late reads, which are dropped when the snapshot changes.
+- **Item-hook pattern**: replacing `state.items[id]` updates that item, and a leaf write wakes neither the list parent nor other items.
 - **`<Activity>`**: hide, write, show. The first visible commit has the new value.
 - **Memoized children.** Cover three cases, and no update may be missed in any of them:
   - reads in the same pass
