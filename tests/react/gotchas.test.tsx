@@ -127,7 +127,7 @@ describe('gotchas: state versus tracked', () => {
   })
 })
 
-describe('gotchas: sync option', () => {
+describe('gotchas: synchronous updates', () => {
   beforeEach(() => {
     vi.useFakeTimers()
   })
@@ -159,7 +159,7 @@ describe('gotchas: sync option', () => {
     expect(input.value).toBe('hello world')
   })
 
-  it('should batch without the sync option', async () => {
+  it('should render once for writes in the same tick', async () => {
     const state = proxy({ count: 0 })
 
     const renderFn = vi.fn()

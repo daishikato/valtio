@@ -213,6 +213,94 @@ describe('errors', () => {
   })
 })
 
+describe('errors from a batch inside a callback', () => {
+  it('should deliver its writes and report its error with the other callback errors', () => {
+    const state = proxy({ a: 0, b: 0 })
+    const fnError = new Error('fn')
+    const bHandler = vi.fn()
+    subscribe(state, () => {
+      if (state.b === 0) {
+        batch(() => {
+          state.b = 1
+          throw fnError
+        })
+      }
+    })
+    subscribe(state, bHandler)
+
+    let thrown: unknown
+    try {
+      state.a = 1
+    } catch (e) {
+      thrown = e
+    }
+
+    expect(state.b).toBe(1)
+    expect(bHandler).toHaveBeenCalledTimes(2)
+    expect(thrown).toBeInstanceOf(AggregateError)
+    expect((thrown as AggregateError).errors).toEqual([fnError])
+  })
+})
+
+describe('coalescing recipe from the subscribe docs', () => {
+  // Keep in sync with docs/api/advanced/subscribe.mdx
+  const subscribeCoalesced = (
+    proxyObject: object,
+    callback: (ops: unknown[]) => void,
+  ) => {
+    const ops: unknown[] = []
+    let scheduled = false
+    let active = true
+    const unsubscribe = subscribe(proxyObject, (newOps) => {
+      ops.push(...newOps)
+      if (!scheduled) {
+        scheduled = true
+        queueMicrotask(() => {
+          scheduled = false
+          if (active) callback(ops.splice(0))
+        })
+      }
+    })
+    return () => {
+      active = false
+      unsubscribe()
+    }
+  }
+
+  afterEach(() => {
+    unstable_enableOp(false)
+  })
+
+  it('should call back once per burst with every op', async () => {
+    unstable_enableOp(true)
+    const state = proxy({ a: 0, b: 0 })
+    const handler = vi.fn()
+    subscribeCoalesced(state, handler)
+
+    state.a = 1
+    state.b = 1
+    expect(handler).not.toHaveBeenCalled()
+
+    await Promise.resolve()
+    expect(handler).toHaveBeenCalledExactlyOnceWith([
+      ['set', ['a'], 1, 0],
+      ['set', ['b'], 1, 0],
+    ])
+  })
+
+  it('should not call back after unsubscribing', async () => {
+    const state = proxy({ count: 0 })
+    const handler = vi.fn()
+    const unsubscribe = subscribeCoalesced(state, handler)
+
+    state.count = 1
+    unsubscribe()
+
+    await Promise.resolve()
+    expect(handler).not.toHaveBeenCalled()
+  })
+})
+
 describe('removed arguments', () => {
   const message =
     'notifyInSync has been removed. subscribe() is synchronous. Use batch() to group notifications.'

@@ -5,7 +5,7 @@ import { subscribe } from '../../vanilla.js'
  *
  * The subscribeKey utility enables subscription to a primitive subproperty of a given state proxy.
  * Subscriptions created with subscribeKey will only fire when the specified property changes.
- * notifyInSync: same as the parameter to subscribe(); true disables batching of subscriptions.
+ * Like subscribe(), the callback runs synchronously; use batch() to group changes.
  *
  * @example
  * import { subscribeKey } from 'valtio/utils'

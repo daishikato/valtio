@@ -72,6 +72,8 @@ In v2, `subscribe` callbacks were batched and called once per microtask, unless 
 - **Callbacks run once per change.** Code that makes several changes and expects one notification should wrap them in [`batch`](../api/advanced/batch). If you prefer the v2 delivery, see the coalescing recipe in [`subscribe`](../api/advanced/subscribe#notifications-are-synchronous).
 - **Errors thrown by callbacks propagate.** They are thrown from the assignment, or from `batch`, as an `AggregateError`, after every subscriber has run.
 - **The `sync` options are gone.** `useSnapshot` and `useProxy` are always synchronous, so the controlled-input caret workaround is no longer needed.
+- **Native array methods notify once per internal change.** `splice`, `sort` and similar methods make several changes, and each one notifies. Wrap them in `batch` to notify once.
+- **Unbatched loops are slower with `useSnapshot`, for now.** A component using `useSnapshot` takes a snapshot on every notification, so a loop of unbatched changes takes one snapshot per change. Wrap the loop in `batch`. A later v3 change removes this cost.
 
 | v2                                              | v3                                     |
 | ----------------------------------------------- | -------------------------------------- |
