@@ -23,7 +23,9 @@ The first writes one property. The second replaces a subtree. v2 spends the same
 
 (1) and (2) are this branch. (3) is not. On the existing subscription candidate, `snapshot(root)` is about 4.3 ms at 5,000 keys and about 89 ms at 50,000, and almost all of that is the copy. The version walk is the small part. Lazy parent links, below, remove the walk. They do not remove the copy.
 
-Skipping the copy means the value a render read stays live. A later event-handler read then sees a newer value, with no TypeScript or runtime error. That is a follow-up, with its own migration note, if a profile still shows the copy.
+Where the hook is called decides the rest. If each item calls `useSnapshot(state.items[id])` and the list parent only reads `Object.keys`, an item write snapshots that item and the list parent stays quiet. That is O(depth + one item), and the docs should recommend it for large collections. The root-hook pattern, `useSnapshot(state).items[id]`, still pays the wide copy once per write.
+
+Skipping that copy means the value a render read stays live. A later read then sees a newer value, with no TypeScript or runtime error. That is a follow-up, with its own migration note, if a profile of the root-hook pattern still shows the copy.
 
 [PR 1161](https://github.com/pmndrs/valtio/pull/1161) is where the "O(1)" name comes from. [Discussion 1177](https://github.com/pmndrs/valtio/discussions/1177) is the v3 list this branch follows. [Issue 1162](https://github.com/pmndrs/valtio/issues/1162) is the other side: after `state.nested = { count: 0 }` while `count` is already `0`, v2 skips the render, and the next `state.nested.count++` must still be visible.
 
@@ -31,7 +33,7 @@ Skipping the copy means the value a render read stays live. A later event-handle
 
 `valtio/vanilla` grows per-key listeners and a subtree listener that registers in O(1). `valtio/react` subscribes only to what the committed render read, and re-renders when one of those subscriptions fires. It does not compare leaves.
 
-`valtio/vanilla` does not know about React. `valtio/react` is built on public vanilla `subscribe`, `snapshot`, `getVersion`, and `isProxyObject`. `proxy-compare` is removed. That also removes the vanilla dependency that existed so React could track snapshots.
+`valtio/vanilla` does not know about React. `valtio/react` is built on public vanilla `subscribe`, `snapshot`, and `isProxyObject`. `proxy-compare` is removed. That also removes the vanilla dependency that existed so React could track snapshots.
 
 Compatibility with `valtio-reactive` is out of scope.
 
@@ -62,9 +64,9 @@ subscribe(proxyObject, callback, { keys, ownKeys })
 
 ### Versions
 
-`getVersion(proxy)` stays one argument. It is the subtree version: it changes exactly when `snapshot(proxy)` would. React uses it for a container read. It is not a per-key clock, and this branch does not add `getVersion(proxy, key)`.
+`getVersion(proxy)` stays one argument. It is the subtree version: it changes exactly when `snapshot(proxy)` would. This branch does not add `getVersion(proxy, key)`.
 
-A per-key clock would also detect the gap between render and subscribe. The hook can do that with the values it already recorded, which is described in the React section. A public overload would be a second way to read the same fact, and vanilla's public surface stays limited to what a caller cannot do with `subscribe`.
+React does not use `getVersion` for the gap check. A container records the snapshot object the render saw, and the check is `snapshot(child) === seen`. A version taken at read time can already include a write that the held snapshot does not show, so comparing versions would miss it. `snapshot(child)` is a cache hit when the child is unchanged. A per-key clock is the same information as the leaf and path checks, plus a new public argument.
 
 ### `batch`
 
@@ -110,7 +112,7 @@ Every snapshot object carries a non-enumerable, non-exported symbol. Assigning a
 
 `proxy(snapshot)` throws the same way. On v3 today that call is already not a usable proxy: a top-level write is dropped, and `proxy(snapshot).nested.count = 2` throws `Cannot assign to read only property`. Copying would be new behavior. `deepClone` strips the symbol and returns a value that can be passed to `proxy`.
 
-The tracking proxy forwards symbol keys. It records an enumerable symbol, because symbol keys are state (`tests/vanilla/proxy.test.ts`). It does not record a non-enumerable own symbol. That covers the brand and the collection index, so the `in` check during assignment does not become a subscription.
+The tracking proxy forwards symbol keys. It records an enumerable symbol, because symbol keys are state (`tests/vanilla/proxy.test.ts`). It does not record a non-enumerable own symbol. That covers the brand, so the `in` check during assignment does not become a subscription. `deepClone` and `applyChanges` read the symbol from `unstable_getInternalStates`. It is not a public export.
 
 `ref(snapshot)` stays allowed, for storing history.
 
@@ -122,13 +124,17 @@ applyChanges(state.nested, next)
 
 `next` may be a plain object, an array, or a `snapshot()`. No snapshot symbol is required. `applyChanges` never stores `next`. The first argument must satisfy `isProxyObject`. `applyChanges(snapshot(state), next)` throws.
 
-For each own key of `next`, `Object.is` leaves are skipped, so a key listener on an unchanged leaf does not run. Where both sides are mergeable and the state side is a proxy, the merge recurses. Mergeable means the prototype is `Object.prototype`, `Array.prototype`, or `null`. A plain snapshot has that prototype, so the common path never assigns the snapshot object. New plain keys are created as plain objects and then proxied by the normal `set`.
+For each own enumerable key of `next`:
 
-A value that is not recursed into is assigned by identity: `Date`, `ref`, a class instance, a `proxyMap`. Those stay the caller's objects, same as `state.x = obj`.
+- Skip when `Object.is` holds. Also skip when `next`'s value is a snapshot and `snapshot(current) === next`'s value, so an unchanged subtree of an immutable update is O(1).
+- Skip accessors. A snapshot of state that has getters carries them, and the proxy already has its own. `applyChanges(state, snapshot(state))` has to work. Accessors are not deleted either.
+- Throw when the value is a `proxyMap` or `proxySet` snapshot, and tell the caller to build a new collection from the entries. A clone would keep methods that close over the source index.
+- Recurse when the current value is a proxy and both sides share a prototype.
+- Otherwise build a plain object or array by recursing into a fresh object. Input objects are not adopted as proxy targets. A snapshot nested inside new data would hit the brand error on the way through `set`.
+- `deepClone` any other snapshot. The clone keeps the prototype, shares `ref` values, and drops the brand.
+- Assign anything else the way `set` would. A `Date`, a `ref`, a class instance, or a live `proxyMap` stays the caller's object.
 
-A `proxyMap` or `proxySet` snapshot must not be assigned and must not be `deepClone`d. The clone copies methods that close over the source index. `applyChanges` throws there and tells the caller to build a new collection from the entries.
-
-Missing keys are deleted. The writes run inside `batch()`. Accessors on `next` throw. This is a data merge, not a descriptor copy.
+Missing own data properties are deleted. The writes run inside `batch()`.
 
 ## Collections
 
@@ -136,9 +142,11 @@ Missing keys are deleted. The writes run inside `batch()`. Accessors on `next` t
 
 v3 keeps the copied index in a `WeakMap` keyed by the receiver. `size` registers it under the snapshot, then `get` on a wrapper misses and uses the live index. React's tracking proxy is that wrapper. A kept tracked map can report `size === 1` and `get('a') === undefined` after a later write. The same miss happens for `new Proxy(snapshot(map), {})`.
 
-The copied index goes on the snapshot under a private non-enumerable symbol and is read by property access. `get`, `has`, and `size` then share one frozen index through any forwarding wrapper.
+The index lives in the collection as a proxied lookup, the approach from `v3-o1-subscription-versioned-index`, with the global `lookup.version` read removed. A snapshot then carries its own lookup, and a wrapper reads it by property access. That needs no `WeakMap` keyed by `this` and no special case in `snapshot`.
 
-`has()` reads `epoch`, and `set()` bumps `epoch` on a value-only update, so every `has()` reader re-renders on any `set()`. That extra render is acceptable. Pointing `has()` at the own-keys listener is a follow-up.
+`lookup`, `data`, and `index` stay non-enumerable, so they do not appear in `Object.keys` or a spread of the collection. `has(k)` and a missing `get(k)` read that key's lookup entry. A present `get(k)` also reads `data[i]`. A value-only `set` writes `data[i]` only, so `has` readers stay quiet. Object keys use enumerable symbols on the lookup. Iteration has to walk those symbols. `Object.keys` on the lookup would miss them.
+
+A structural change copies the lookup on the next snapshot, which is the same order as copying `data`. Writes to the lookup go through the proxy, so listeners see them. The branch's `lookup.version` read is what made every lookup subscribe to every structural change. It stays out.
 
 `proxy(proxy(x))` stays a distinct wrapper.
 
@@ -153,8 +161,8 @@ The tracking proxy records reads during render and does not subscribe. `useSyncE
 | nothing | | none |
 | `tracked.count` when the value is not a child proxy | the value | key `count` |
 | `tracked.nested.count` | the child proxy at `nested`, and the value of `count` | key `nested` on the parent, and key `count` on that child |
-| `tracked.nested` and no property of it | `getVersion` of the child | key `nested` on the parent, and a subtree listener on the child |
-| `trackKey(tracked.obj)` while also reading a leaf | `getVersion(tracked.obj)`, plus the leaf | subtree listener on `obj`, plus the leaf's key |
+| `tracked.nested` and no property of it | the child snapshot | key `nested` on the parent, and a subtree listener on the child |
+| `trackKey(tracked.obj)` while also reading a leaf | the child snapshot, plus the leaf | subtree listener on `obj`, plus the leaf's key |
 | getter | the reads it makes through `this` | those reads, not the owning object |
 | `'k' in tracked`, `hasOwn` | whether the key is present | key listener for `k` |
 | `Object.keys`, `for...in` | the own-key list | `{ ownKeys: true }` |
@@ -164,11 +172,15 @@ The tracking proxy records reads during render and does not subscribe. `useSyncE
 
 The parent key in `tracked.nested.count` is what makes replacement work. `state.nested = { count: 1 }` notifies `nested`. The component re-renders and subscribes to `count` on the new child. `state.nested.count = 1` notifies `count` only. A sibling write notifies neither.
 
-`trackKey` is the migration for proxy-compare's `trackMemo`. Reading `t.obj.x` must not subscribe to the rest of `obj`, or a leaf reader wakes up on siblings. An object read with no further key only covers the call sites that do not also read a leaf. `useEffect(..., [tracked.obj])` after `trackMemo` is the call site that does both. `useDebugValue` lists the recorded keys.
+`trackKey(node)` is the migration for proxy-compare's `trackMemo(node)`. It marks that tracked node as a container and returns it. Reading `t.obj.x` must not subscribe to the rest of `obj`, or a leaf reader wakes up on siblings. An object read with no further key only covers the call sites that do not also read a leaf. `useEffect(..., [tracked.obj])` after `trackMemo` is the call site that does both. `useDebugValue` lists the recorded keys.
+
+An accessor is not value-compared. An object-returning getter has a new identity on each access, so comparing it would re-render on every check. The subscription is the reads the getter makes through `this`.
 
 No read installs no listener. `useSnapshot(state.obj)` used only as a boolean does not re-render.
 
-A memoized child that renders later against the same snapshot records its own reads and subscribes in its own layout effect. A read from an event handler does not subscribe. The handler sees the snapshot from the render.
+Reads from children in the same pass, before this hook's layout effect, belong to this render's records. A later read on the same tracked proxy is a late read: a memoized child that renders on its own, an effect, or an event handler. React has no public way to tell those apart. A microtask subscribes a late read and runs the same check. Late reads only add subscriptions. The next commit of this hook rebuilds the set from that render's reads, so a key read only in a handler costs at most one extra render and is then dropped.
+
+The microtask subscribes only for a hook that has committed. A read during a render that is still in progress is part of that render's records, and a render that never commits leaves no listener. Same-pass children are that case. The microtask is for a read that happens after the layout effect.
 
 ### `getSnapshot`
 
@@ -183,7 +195,8 @@ The check compares only those newly recorded facts, against the raw proxy:
 
 - a leaf value, with `Object.is`
 - a path, by whether `P[k]` is still the child proxy recorded at read time
-- a container, with `getVersion(P)`
+- a container, by whether `snapshot(child) ===` the snapshot the render saw
+- presence, for `in` and `hasOwn`
 - own keys, by the key list
 
 The comparison does not read through the tracking proxy, and it does not compare a snapshot object with a proxy. Those two are unequal even when nothing was written. A write that has been reverted to the recorded value leaves the rendered output unchanged, so the check ignores it.
@@ -235,7 +248,7 @@ From `valtio` / `valtio/vanilla`:
 | `batch(fn)` | added with the sync-notification change |
 | `isProxyObject(value)` | added |
 | `unstable_isRef(value)` | added |
-| `getVersion(proxy)` | unchanged, one argument |
+| `getVersion(proxy)` | unchanged, one argument; React does not call it |
 
 From `valtio/react`:
 
@@ -263,7 +276,6 @@ Not added: a key argument on `getVersion`, a public snapshot symbol, a sentinel 
 - replacing `unstable_replaceInternalFunction`
 - `use(store)`
 - branded proxy types
-- `has()` on a collection subscribing to own keys instead of `epoch`
 
 ## Migration that users can see
 
@@ -280,3 +292,4 @@ Not added: a key argument on `getVersion`, a public snapshot symbol, a sentinel 
 | `trackMemo` from proxy-compare | `trackKey` |
 | `Object.keys` / `for...in` on a list parent | still ignores value writes |
 | `'k' in tracked` | also re-renders when the value changes |
+| a key read only from an event handler | at most one extra render, then the subscription is dropped |
