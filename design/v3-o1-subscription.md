@@ -1,6 +1,6 @@
 # Valtio v3 O(1) Subscription — Design Proposal
 
-**Status: proposal for maintainer review.** Nothing in this document is agreed, and nothing is implemented. It merges two agent drafts: this one and #2, which is now closed. Where the drafts disagreed, the review threads on #2 and #3 settled the point, and this document states the result.
+**Status: proposal for maintainer review.** The delivery plan and a few points are decided; see [Decided](#decided). Everything else is still a proposal, and nothing is implemented. It merges two agent drafts: this one and #2, which is now closed. Where the drafts disagreed, the review threads on #2 and #3 settled the point, and this document states the result.
 
 **How to read it.** Start with [At a glance](#at-a-glance) and [Questions for you](#questions-for-you), which together fit on about two screens. The later sections give the detail for each layer, and the appendix holds the measurements.
 
@@ -11,11 +11,12 @@ The goal is fast atomic mutation. A write like `state.items[5].count++` should c
 - **Vanilla**
   - `subscribe(p, cb, { keys, ownKeys })` listens to direct keys, or to own keys being added or removed.
   - A write pushes versions up to linked parents, so `snapshot()` stops walking the whole tree.
-  - New exports: `batch`, `isProxyObject`, `unstable_isRef`.
+  - New exports: `batch`, `isProxyObject`, `unstable_isRef`. `getVersion` is removed; `isProxyObject` replaces its common use as a proxy check.
 - **React**
   - `useSnapshot` subscribes to the keys read against the committed snapshot: in its layout effect for reads made during render, and in a microtask for reads made later.
-  - Keys read for the first time are checked against live state before paint.
-  - There is no leaf comparison otherwise. React needs only `snapshot`, `subscribe` and `isProxyObject` from vanilla, and proxy-compare is removed.
+  - Keys read for the first time are checked against live state, both in React's pre-commit tearing check and in the layout effect.
+  - Components still render only immutable snapshots. `getSnapshot` returns a per-hook counter, and render takes the snapshot, so a burst of writes costs no snapshots.
+  - There is no leaf comparison otherwise. React needs only `snapshot`, `subscribe` and `isProxyObject` from vanilla. proxy-compare is first embedded, then replaced.
 - **Snapshots**
   - Getters are live, not cached.
   - Every snapshot carries an unexported brand, so assigning a snapshot into state, or calling `proxy(snapshot)`, throws with a hint.
@@ -23,9 +24,11 @@ The goal is fast atomic mutation. A write like `state.items[5].count++` should c
   - `applyChanges(proxy, next)` is the quiet path for replacing data.
   - `subscribeInAsync` keeps today's microtask delivery.
   - `proxyMap` and `proxySet` keep their index in state, which fixes stale reads through wrappers.
-- **Delivery**
-  - A precursor PR into `v3` makes notifications sync-only and adds `batch()`.
-  - This branch then lands in eight reviewable commits.
+- **Delivery:** separate PRs into `v3`, one at a time:
+  - a) sync-only notifications and `batch()`
+  - b) `isProxyObject` and `unstable_isRef`, and removal of `getVersion`
+  - c) proxy-compare embedded
+  - d1–d6) the subscription work
 
 ## Questions for you
 
@@ -42,24 +45,30 @@ These are the decisions the design needs from you. Each one states the proposed 
    - Assigning a snapshot into state, or calling `proxy(snapshot)`, throws.
    - A key read only in an event handler subscribes until the snapshot changes: at most one extra render, as in v2.
 4. **New public API, for your strict review:**
-   - vanilla: `subscribe` options, `batch`, `isProxyObject`, `unstable_isRef`
+   - vanilla: `subscribe` options, `batch`, `isProxyObject`, `unstable_isRef`, and `getVersion` removed (decided)
    - utils: `subscribeInAsync`, `applyChanges`
    - react: `trackKey`
    - Also one new entry in `unstable_getInternalStates`, the brand, which `deepClone` and `applyChanges` need.
    - See [Public API](#public-api).
 5. **Names:** `trackKey`, `ownKeys`, `subscribeInAsync`, `unstable_isRef`.
-6. **Delivery:** should lazy parent links ship as their own PR first? They are vanilla-only, change no API, and make `snapshot()` faster today.
-7. **Collections:** keep the index in state, following the `versioned-index` branch? This is proposed over a private-symbol copy of the index.
-8. **Following replacement.** `useSnapshot(state.items[id])` keeps listening to a detached item after `state.items[id]` is replaced, which is also true in v3 today. There are three options:
+6. **Collections:** keep the index in state, following the `versioned-index` branch? This is proposed over a private-symbol copy of the index.
+7. **Following replacement.** `useSnapshot(state.items[id])` keeps listening to a detached item after `state.items[id]` is replaced, which is also true in v3 today. There are three options:
    - Proposed: document the [item-hook pattern](#the-item-hook-pattern). It uses public APIs only.
    - Alternative: ship the recipe as a small hook in `valtio/react/utils`. It adds no vanilla API, but it is one more export.
    - Alternative: `useSnapshot` subscribes itself to the parent key that currently points at its proxy. That needs a new public vanilla signal, because parent links are internal. It also helps only components that re-derive the proxy during render.
-9. **Your remaining preferences**, major and minor.
+8. **Your remaining preferences**, major and minor.
+
+### Decided
+
+- This document is the design of record; #2 is closed.
+- The work lands as separate PRs into `v3`, in the order in the [delivery plan](#delivery-plan).
+- Notifications are sync-only. In PR a, `useSnapshot` pays for a snapshot on every unbatched write, which is accepted with a `TODO` until d5 removes it.
+- PR c re-exports `getUntracked` and `trackMemo`; the d PRs replace them.
+- PR b removes `getVersion`.
+- `snapshot()` keeps its semantics. React renders only immutable snapshots, which is what makes Valtio safe under concurrent rendering.
 
 **Assumptions from your earlier messages, to confirm:**
 
-- `notifyInSync` goes away, with `batch()` added, preferably in a precursor PR merged into `v3` first.
-- `isProxyObject` and `unstable_isRef` land in this branch.
 - A `useSnapshot` that reads nothing may stop subscribing. That change is silent but harmless.
 - Getter result caching may go, since `valtio-reactive` covers computed values.
 - A symbol on snapshots is acceptable for the runtime migration error.
@@ -135,35 +144,31 @@ The parent must not pass `snap.items[id]` without reading it. Under the containe
 
 ## Delivery plan
 
-**PR 1, a precursor into `v3`: sync-only notifications**
+Each step is its own PR into `v3`, reviewed and merged before the next one starts. `v3` is unreleased, so an interim state between PRs never ships.
 
-- Remove `notifyInSync` from `subscribe` and `subscribeKey`, and `sync` from `useSnapshot` and `useProxy`. Each removal is a TypeScript error, and passing the old argument also throws at runtime (messages in [Migration](#migration)).
-- Add `batch(fn)` to vanilla and `subscribeInAsync` to `valtio/utils`. `devtools` switches to `subscribeInAsync`.
-- `proxyMap` and `proxySet` wrap each method in `batch()`.
-- Native `splice` and `sort` keep notifying once per internal write, and callers wrap them in `batch()`. Batching them automatically would need a `get` trap on every array read.
+| PR  | Scope                                                                                                         | Needs       | Notes                                                                                                                                          |
+| --- | ------------------------------------------------------------------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| a   | Sync-only notifications, `batch()`, `subscribeInAsync`                                                        | —           | [Design note](./v3-sync-notifications.md). `useSnapshot` takes a snapshot per unbatched write until d5                                         |
+| b   | `isProxyObject` and `unstable_isRef`; remove `getVersion`                                                     | a           | Utils stop reading `unstable_getInternalStates` where these suffice. PR a provides the sync-`subscribe` path for change detection              |
+| c   | Embed proxy-compare, dropping what Valtio doesn't use                                                         | —           | No behavior change. `valtio/react` re-exports `getUntracked` and `trackMemo`. Vanilla still calls the in-tree `markToTrack` and `getUntracked` |
+| d1  | Lazy parent links                                                                                             | —           | No API change; `snapshot()` stops walking the tree                                                                                             |
+| d2  | `subscribe(p, cb, { keys, ownKeys })`, an O(1) `subscribeKey`, and no notification for deleting an absent key | a           |                                                                                                                                                |
+| d3  | Snapshot semantics: live getters, the brand, the assignment error                                             | c           | Removes vanilla's `getUntracked` unwrap. `deepClone` skips the brand, and the embedded tracker forwards it without recording it                |
+| d4  | Collections keep their index in state                                                                         | a           |                                                                                                                                                |
+| d6  | `applyChanges`                                                                                                | a, d3       | Lands before d5, so the quiet path for replacement exists before the equal-replacement break                                                   |
+| d5  | The React switch: new tracker, `trackKey`, counter-based `getSnapshot`                                        | b, c, d1–d4 | Removes the embedded `isChanged` path, the `getUntracked` and `trackMemo` re-exports, and vanilla's `markToTrack` call                         |
 
-**PR 2, the `v3-o1-subscription` branch into `v3`.** Each commit passes the suite on its own:
-
-1. Vanilla: `isProxyObject` and `unstable_isRef`. Utils use them instead of reading `unstable_getInternalStates`.
-2. Vanilla: lazy parent links. This is a speed-up with no API change.
-3. Vanilla: the `subscribe` options. `subscribeKey` is rebuilt on them, and deleting an absent key no longer notifies.
-4. Vanilla: snapshot semantics, meaning live getters, the brand, and the assignment error. `deepClone` skips the brand.
-5. Utils: collections keep their index in state.
-6. React: the new tracker and `trackKey`, and removal of proxy-compare.
-7. Utils: `applyChanges`.
-8. Docs: migration guide, API pages, and the item-hook pattern for large collections, including replacement.
-
-Tests from the WIP branches are ported into the commit whose behavior they cover.
+Each PR updates the docs for what it changes. A final pass assembles the migration guide and documents the item-hook pattern. Tests from the WIP branches are ported into the PR whose behavior they cover.
 
 ## Vanilla
 
 ### Versions and lazy parent links
 
-Every write takes one number from a global clock. A proxy's version is the latest write anywhere in its subtree, so it changes exactly when `snapshot(p)` would. `getVersion(p)` stays single-argument, and there are no per-key versions.
+Every write takes one number from a global clock. A proxy's version is the latest write anywhere in its subtree, so it changes exactly when `snapshot(p)` would. The version stays internal: PR b removes `getVersion` from the public API, and there are no per-key versions.
 
 - **Linking.** A parent links to its children the first time something needs its subtree:
   - `snapshot(p)`
-  - `getVersion(p)`
+  - a subscription that needs the subtree version internally
   - a subtree `subscribe(p)`
 
   That first pass is O(subtree), which the first snapshot pays anyway.
@@ -300,11 +305,11 @@ Every tracked node belongs to one root snapshot `S`. A read from any component g
 A layout effect in the hook runs after every commit. It does two things:
 
 1. **Reconcile.** Install the set for the committed snapshot and remove subscriptions that are not in it. This is O(changed records), and key and own-key records are grouped into one `subscribe` call per proxy.
-2. **Check** the records that were not installed before this commit. If one fails, mark the held snapshot stale and schedule a sync re-render, which React processes before paint.
+2. **Check** the records that were not installed before this commit. If one fails, move the hook's counter and schedule a sync re-render, which React processes before paint.
 
 Why this is enough:
 
-- **Records installed by an earlier commit** were listening all along, so a write to them has already marked the snapshot stale.
+- **Records installed by an earlier commit** were listening all along, so a write to them has already moved the counter.
 - **Newly read records** are covered by the check. It runs after the children's layout effects, and after layout effects declared before `useSnapshot` in the same component. A write from any of those to a key read for the first time is therefore on screen before paint. Layout effects declared after `useSnapshot` write into listeners that are already installed.
 - **A render that never commits** leaves nothing behind if it took a new snapshot. If it reused the committed snapshot, as Strict Mode's extra render or a suspended transition can, its reads are late reads. Every listener belongs to the mounted hook and is removed on unmount, so no finalization registry is needed.
 - **A hidden `<Activity>`** drops all subscriptions. Showing it again reinstalls and checks every record, so writes made while it was hidden appear before the first paint.
@@ -313,9 +318,12 @@ After each commit, the held snapshot agrees with live state on every installed r
 
 ### Between commits
 
-- **Listeners** mark the held snapshot stale and notify React. They go through `useSyncExternalStore`'s callback, or on mount, before that callback exists, through a state update.
-- **`getSnapshot`** returns the held snapshot until it is stale, then takes `snapshot(p)` once. An unrelated write never changes what it returns, so React's consistency checks never copy the wide node.
-- **A new `p` argument** drops the held snapshot and its records, and takes `snapshot(p)`. The next commit swaps the subscriptions. Without this, a hook whose proxy was replaced would keep returning the detached proxy's snapshot, because nothing marks it stale.
+- **Listeners** move a per-hook counter and notify React. They go through `useSyncExternalStore`'s callback, or on mount, before that callback exists, through a state update.
+- **`getSnapshot`** returns that counter, not a snapshot, so a notification costs O(1) and a burst of writes takes no snapshots. It works like a `getVersion` filtered to the keys this hook read.
+- **Render** uses the held snapshot, or calls `snapshot(p)` once if the counter moved since the snapshot was taken. The counter and the snapshot are read in the same synchronous render, so they always match. Components still render only immutable snapshots; the counter only changes what React compares in its tearing checks.
+- **Outside render**, `getSnapshot` also runs the hook-local check on the records of a render that has not committed yet, and moves the counter if one fails. React's pre-commit consistency check then re-renders before commit, which is when v3's `isChanged` catches it today. Otherwise a write to a key first read in that render would be caught only in the layout effect.
+- An unrelated write never moves the counter, so React's consistency checks never copy the wide node.
+- **A new `p` argument** drops the held snapshot and its records, and takes `snapshot(p)`. The next commit swaps the subscriptions. Without this, a hook whose proxy was replaced would keep returning the detached proxy's snapshot, because nothing moves its counter.
 - **Late reads** are subscribed in a microtask, which also runs the same check on them.
   - They only add subscriptions, and never narrow a container.
   - They are dropped when the snapshot changes.
@@ -362,30 +370,30 @@ A tracked snapshot passed as `next` from an event handler records late reads, an
 
 **`valtio` / `valtio/vanilla`**
 
-| Export                       | Change                                                                              |
-| ---------------------------- | ----------------------------------------------------------------------------------- |
-| `subscribe(p, cb, options?)` | The boolean third argument throws; `{ keys, ownKeys }` replaces it                  |
-| `batch(fn)`                  | New, in PR 1                                                                        |
-| `isProxyObject(x)`           | New                                                                                 |
-| `unstable_isRef(x)`          | New                                                                                 |
-| `getVersion(p)`              | Unchanged, single argument; React no longer calls it                                |
-| `unstable_getInternalStates` | Gains the snapshot brand, for `deepClone` and `applyChanges`; other contents change |
+| Export                       | Change                                                                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `subscribe(p, cb, options?)` | The boolean third argument throws; `{ keys, ownKeys }` replaces it                                                              |
+| `batch(fn)`                  | New, in PR a                                                                                                                    |
+| `isProxyObject(x)`           | New                                                                                                                             |
+| `unstable_isRef(x)`          | New                                                                                                                             |
+| `getVersion(p)`              | Removed in PR b. Use `isProxyObject(x)` for proxy checks, and `snapshot(p)` identity or a `subscribe` flag for change detection |
+| `unstable_getInternalStates` | Gains the snapshot brand, for `deepClone` and `applyChanges`; other contents change                                             |
 
 **`valtio/react`**
 
-| Export                                | Change                                                |
-| ------------------------------------- | ----------------------------------------------------- |
-| `useSnapshot(p)`                      | The options argument throws; proxy-compare is removed |
-| `trackKey(node)`                      | New; replaces proxy-compare's `trackMemo(node)`       |
-| `useProxy(p)` in `valtio/react/utils` | The `sync` option throws                              |
+| Export                                | Change                                                                               |
+| ------------------------------------- | ------------------------------------------------------------------------------------ |
+| `useSnapshot(p)`                      | The options argument throws; proxy-compare is embedded in PR c and replaced in PR d5 |
+| `trackKey(node)`                      | New; replaces proxy-compare's `trackMemo(node)`                                      |
+| `useProxy(p)` in `valtio/react/utils` | The `sync` option throws                                                             |
 
 **`valtio/utils`**
 
-| Export                           | Change                                                  |
-| -------------------------------- | ------------------------------------------------------- |
-| `applyChanges(proxy, next)`      | New                                                     |
-| `subscribeInAsync(p, cb, opts?)` | New, in PR 1; today's microtask-batched delivery        |
-| `subscribeKey(p, key, cb)`       | Built on `{ keys }`; the `notifyInSync` argument throws |
+| Export                      | Change                                                  |
+| --------------------------- | ------------------------------------------------------- |
+| `applyChanges(proxy, next)` | New                                                     |
+| `subscribeInAsync(p, cb)`   | New, in PR a; today's microtask-batched delivery        |
+| `subscribeKey(p, key, cb)`  | Built on `{ keys }`; the `notifyInSync` argument throws |
 
 **Not added:**
 
@@ -398,21 +406,23 @@ A tracked snapshot passed as `next` from an event handler records late reads, an
 
 ## Migration
 
-| v2 → v3 change                                                             | Detection                                  | Remedy                                       |
-| -------------------------------------------------------------------------- | ------------------------------------------ | -------------------------------------------- |
-| `subscribe(p, cb, true)`, `subscribeKey(…, true)`                          | TypeScript error; runtime error (1)        | Drop it; use `batch()` or `subscribeInAsync` |
-| `useSnapshot(p, { sync })`, `useProxy(p, { sync })`                        | TypeScript error; runtime error (2)        | Drop it                                      |
-| A snapshot or tracked snapshot assigned into state, or passed to `proxy()` | Runtime error (3)                          | `deepClone`, `applyChanges`, or `ref`        |
-| An own setter called on a snapshot                                         | Runtime `TypeError` in strict mode         | Write to the proxy                           |
-| `Object.freeze` on a snapshot, then `useSnapshot`                          | Runtime error                              | Don't freeze snapshots                       |
-| A getter reads state through a closure (`state.count`)                     | Docs                                       | Read through `this`                          |
-| Snapshot getters aren't cached; object results get a new identity          | Docs                                       | `proxy-memoize` or `valtio-reactive`         |
-| `trackMemo` and `getUntracked` from proxy-compare                          | Docs                                       | `trackKey`; read the proxy in callbacks      |
-| Replacing a read object with equal leaves re-renders                       | Silent, harmless                           | `applyChanges`                               |
-| `'k' in snap` and `hasOwn` re-render on value writes                       | Silent, harmless                           | —                                            |
-| A key read only in an event handler                                        | Silent, harmless: at most one extra render | Read the proxy in callbacks                  |
-| `useSnapshot` with no reads no longer subscribes                           | Silent, harmless                           | Read what you render                         |
-| Deleting an absent key no longer notifies                                  | Silent, harmless                           | —                                            |
+| v2 → v3 change                                                                        | Detection                                  | Remedy                                                                                                 |
+| ------------------------------------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `subscribe` callbacks run synchronously on every write, instead of once per microtask | Docs                                       | `batch()`, or `subscribeInAsync` for the old delivery                                                  |
+| `subscribe(p, cb, true)`, `subscribeKey(…, true)`                                     | TypeScript error; runtime error (1)        | Drop it; use `batch()` or `subscribeInAsync`                                                           |
+| `getVersion` removed                                                                  | TypeScript error; import error             | `isProxyObject(x)` for proxy checks; `snapshot(p)` identity or a `subscribe` flag for change detection |
+| `useSnapshot(p, { sync })`, `useProxy(p, { sync })`                                   | TypeScript error; runtime error (2)        | Drop it                                                                                                |
+| A snapshot or tracked snapshot assigned into state, or passed to `proxy()`            | Runtime error (3)                          | `deepClone`, `applyChanges`, or `ref`                                                                  |
+| An own setter called on a snapshot                                                    | Runtime `TypeError` in strict mode         | Write to the proxy                                                                                     |
+| `Object.freeze` on a snapshot, then `useSnapshot`                                     | Runtime error                              | Don't freeze snapshots                                                                                 |
+| A getter reads state through a closure (`state.count`)                                | Docs                                       | Read through `this`                                                                                    |
+| Snapshot getters aren't cached; object results get a new identity                     | Docs                                       | `proxy-memoize` or `valtio-reactive`                                                                   |
+| `trackMemo` and `getUntracked` from proxy-compare                                     | Docs                                       | `trackKey`; read the proxy in callbacks                                                                |
+| Replacing a read object with equal leaves re-renders                                  | Silent, harmless                           | `applyChanges`                                                                                         |
+| `'k' in snap` and `hasOwn` re-render on value writes                                  | Silent, harmless                           | —                                                                                                      |
+| A key read only in an event handler                                                   | Silent, harmless: at most one extra render | Read the proxy in callbacks                                                                            |
+| `useSnapshot` with no reads no longer subscribes                                      | Silent, harmless                           | Read what you render                                                                                   |
+| Deleting an absent key no longer notifies                                             | Silent, harmless                           | —                                                                                                      |
 
 Runtime messages:
 
@@ -426,15 +436,16 @@ The closure-getter row is the riskiest, because v2's computed-properties guide i
 
 **Existing `v3` tests that change.** This list comes from reading the suite; an implementation will confirm it.
 
-| Test                                                                     | Cause                                                  |
-| ------------------------------------------------------------------------ | ------------------------------------------------------ |
-| `optimization`: "should not rerender if the leaf value does not change"  | Equal-leaf replacement re-renders                      |
-| `optimization`: "should track property existence with the in operator"   | A value-only write re-renders an `in` reader           |
-| `optimization`: "should track own-property checks"                       | A value-only write re-renders a `hasOwn` reader        |
-| `optimization`: "should unwrap nested snapshots assigned outside render" | The assignment now throws                              |
-| `getter`: "simple object getters", "object getters returning object"     | The getter runs on every access, not once per snapshot |
-| `vanilla/snapshot`: proxy-compare interop                                | proxy-compare is removed                               |
-| Tests passing `notifyInSync` or `{ sync: true }`                         | They drop the argument                                 |
+| Test                                                                                    | Cause                                                  |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `optimization`: "should not rerender if the leaf value does not change"                 | Equal-leaf replacement re-renders                      |
+| `optimization`: "should track property existence with the in operator"                  | A value-only write re-renders an `in` reader           |
+| `optimization`: "should track own-property checks"                                      | A value-only write re-renders a `hasOwn` reader        |
+| `optimization`: "should unwrap nested snapshots assigned outside render"                | The assignment now throws                              |
+| `getter`: "simple object getters", "object getters returning object"                    | The getter runs on every access, not once per snapshot |
+| `vanilla/snapshot`: proxy-compare interop                                               | proxy-compare is removed                               |
+| Tests passing `notifyInSync` or `{ sync: true }`                                        | They drop the argument (PR a)                          |
+| `vanilla/proxy`: the `getVersion` tests and its `isProxy` helper; `vanilla/entrypoints` | `getVersion` is removed (PR b)                         |
 
 **Existing tests the design relies on**, which keep passing:
 
@@ -446,7 +457,7 @@ The closure-getter row is the riskiest, because v2's computed-properties guide i
 
 ### Validation plan
 
-Each item becomes a test in the commit it covers.
+Each item becomes a test in the PR it covers.
 
 - **#1160 benchmark**, committed this time. It covers both component patterns at N = 1,000, 5,000 and 50,000, and reports components woken, write-to-commit time, and `snapshot` calls per write.
 - **Render→commit gaps.** A child's layout effect, and a later sibling's, each write a key first read in this render. Both writes are in the DOM before the passive phase.
@@ -471,6 +482,8 @@ Each item becomes a test in the commit it covers.
   - Accessors are skipped.
   - A collection snapshot throws.
 - **Collections**: `get`, `has` and `size` agree through a wrapper after later writes, and a value-only `set` leaves `has` readers quiet.
+- **Tearing (d5)**: run the tearing checks from will-this-react-global-state-work-in-concurrent-rendering, since the suite covers concurrent rendering only partly.
+- **Burst of writes (d5)**: the loop from the [appendix](#appendix-evidence-and-references) takes no per-write snapshot.
 - **Bundle**: report minified and gzipped sizes against `v3` plus proxy-compare (6,188 / 2,985 B) and the WIP candidate (10,533 / 4,431 B).
 
 ## Out of scope
@@ -488,14 +501,16 @@ Each item becomes a test in the commit it covers.
 
 All measurements ran in this session's container: Node 22.22.2, vitest 4.1.5 with jsdom, and a React 19.2.5 dev build. `v3` is `fb594a1`; the WIP candidate is `v3-o1-subscription-versioned-index` at `1fec378`. The benchmark code is not committed yet; the validation plan commits it.
 
-| Finding                                                                             | Result                                                                                               |
-| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Version checks per `snapshot(root)` over 1,000 items, after an unrelated root write | 1,002 on both `v3` and the candidate                                                                 |
-| Key listeners registered per render by the candidate's `useSnapshot`                | Re-registered on every render; `v3` registers its listeners once                                     |
-| v2 (`main`): `state.b = snap.a; state.b.count = 2`                                  | `count` stays 1, no error                                                                            |
-| `v3` `proxyMap`: `new Proxy(snapshot(m), {}).get('first')` after later writes       | `undefined`, expected 1                                                                              |
-| Copying a 50,000-key node                                                           | 89 ms full snapshot; 38 ms per-key copy loop; 27 ms plain `{ ...prev }`                              |
-| Bundle, minified / gzipped                                                          | Candidate 10,533 / 4,431 B, no dependencies; `v3` 3,561 / 1,734 B plus proxy-compare 2,627 / 1,251 B |
+| Finding                                                                                                      | Result                                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Version checks per `snapshot(root)` over 1,000 items, after an unrelated root write                          | 1,002 on both `v3` and the candidate                                                                                                                                  |
+| Key listeners registered per render by the candidate's `useSnapshot`                                         | Re-registered on every render; `v3` registers its listeners once                                                                                                      |
+| v2 (`main`): `state.b = snap.a; state.b.count = 2`                                                           | `count` stays 1, no error                                                                                                                                             |
+| `v3` `proxyMap`: `new Proxy(snapshot(m), {}).get('first')` after later writes                                | `undefined`, expected 1                                                                                                                                               |
+| Copying a 50,000-key node                                                                                    | 89 ms full snapshot; 38 ms per-key copy loop; 27 ms plain `{ ...prev }`                                                                                               |
+| Marking N items done without `batch()`, component reads only `items.length`, sync delivery (PR a's behavior) | 936 ms at N = 1,000 and 26 s at N = 5,000; 9 ms and 28 ms with today's async default                                                                                  |
+| `getVersion` in published ecosystem packages                                                                 | valtio-yjs 0.7.0: proxy check only. derive-valtio 0.2.0 and valtio-reactive 0.2.0: change detection. valtio-history, valtio-persist, jotai-valtio, use-valtio: unused |
+| Bundle, minified / gzipped                                                                                   | Candidate 10,533 / 4,431 B, no dependencies; `v3` 3,561 / 1,734 B plus proxy-compare 2,627 / 1,251 B                                                                  |
 
 **Sources**
 
