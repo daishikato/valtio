@@ -241,6 +241,8 @@ Proposal, landing in d2 with the key-level subscriptions:
 - The binding diffs the proxy array against the `Y.Array` and computes a real edit script.
 - Nested containers are matched by identity: the proxy bound to each Y item. Primitives are matched by value. Matching containers by deep equality, as valtio-yjs does today, can bind an existing Y item to a new, equal object.
 - A common prefix and suffix is a fast path for one contiguous edit, such as `push`, `pop` or a single `splice`. Several edit regions in one batch, such as `sort` or two splices, need the full diff. Rewriting the middle instead gives the items new Yjs identities and drops concurrent edits to them, which is what valtio-yjs's `parseProxyOps` exists to avoid.
+  - The fast path is safe only when the two middles left after the prefix and suffix share no match. A shared match means the full diff.
+- Equal primitives are ambiguous. Inserting `a` into `[a, a, a]` gives `[a, a, a, a]` whether it went in at 0 or at the end, so no diff can recover the index. The local array is correct either way, but a concurrent insert can land at a different position than the original `splice` would have given. Containers matched by identity have no such ambiguity. This is the cost of dropping the op stream, and it is accepted.
 
 **`devtools`** names `set:` and `delete:` paths by diffing the previous snapshot against the current one. It already keeps the previous snapshot for each message.
 
