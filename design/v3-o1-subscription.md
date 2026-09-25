@@ -22,7 +22,6 @@ The goal is fast atomic mutation. A write like `state.items[5].count++` should c
   - Every snapshot carries an unexported brand, so assigning a snapshot into state, or calling `proxy(snapshot)`, throws with a hint.
 - **Utils**
   - `applyChanges(proxy, next)` is the quiet path for replacing data.
-  - `subscribeInAsync` keeps today's microtask delivery.
   - `proxyMap` and `proxySet` keep their index in state, which fixes stale reads through wrappers.
 - **Delivery:** separate PRs into `v3`, one at a time:
   - a) sync-only notifications and `batch()`
@@ -46,11 +45,11 @@ These are the decisions the design needs from you. Each one states the proposed 
    - A key read only in an event handler subscribes until the snapshot changes: at most one extra render, as in v2.
 4. **New public API, for your strict review:**
    - vanilla: `subscribe` options, `batch`, `isProxyObject`, `unstable_isRef`, and `getVersion` removed (decided)
-   - utils: `subscribeInAsync`, `applyChanges`
+   - utils: `applyChanges` (`subscribeInAsync` is proposed not to be added; see the [PR a note](./v3-sync-notifications.md#open-question))
    - react: `trackKey`
    - Also one new entry in `unstable_getInternalStates`, the brand, which `deepClone` and `applyChanges` need.
    - See [Public API](#public-api).
-5. **Names:** `trackKey`, `ownKeys`, `subscribeInAsync`, `unstable_isRef`.
+5. **Names:** `trackKey`, `ownKeys`, `unstable_isRef`.
 6. **Collections:** keep the index in state, following the `versioned-index` branch? This is proposed over a private-symbol copy of the index.
 7. **Following replacement.** `useSnapshot(state.items[id])` keeps listening to a detached item after `state.items[id]` is replaced, which is also true in v3 today. There are three options:
    - Proposed: document the [item-hook pattern](#the-item-hook-pattern). It uses public APIs only.
@@ -148,7 +147,7 @@ Each step is its own PR into `v3`, reviewed and merged before the next one start
 
 | PR  | Scope                                                                                                         | Needs       | Notes                                                                                                                                          |
 | --- | ------------------------------------------------------------------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| a   | Sync-only notifications, `batch()`, `subscribeInAsync`                                                        | —           | [Design note](./v3-sync-notifications.md). `useSnapshot` takes a snapshot per unbatched write until d5                                         |
+| a   | Sync-only notifications and `batch()`                                                                         | —           | [Design note](./v3-sync-notifications.md). `useSnapshot` takes a snapshot per unbatched write until d5                                         |
 | b   | `isProxyObject` and `unstable_isRef`; remove `getVersion`                                                     | a           | Utils stop reading `unstable_getInternalStates` where these suffice. PR a provides the sync-`subscribe` path for change detection              |
 | c   | Embed proxy-compare, dropping what Valtio doesn't use                                                         | —           | No behavior change. `valtio/react` re-exports `getUntracked` and `trackMemo`. Vanilla still calls the in-tree `markToTrack` and `getUntracked` |
 | d1  | Lazy parent links                                                                                             | —           | No API change; `snapshot()` stops walking the tree                                                                                             |
@@ -320,8 +319,13 @@ After each commit, the held snapshot agrees with live state on every installed r
 
 - **Listeners** move a per-hook counter and notify React. They go through `useSyncExternalStore`'s callback, or on mount, before that callback exists, through a state update.
 - **`getSnapshot`** returns that counter, not a snapshot, so a notification costs O(1) and a burst of writes takes no snapshots. It works like a `getVersion` filtered to the keys this hook read.
-- **Render** uses the held snapshot, or calls `snapshot(p)` once if the counter moved since the snapshot was taken. The counter and the snapshot are read in the same synchronous render, so they always match. Components still render only immutable snapshots; the counter only changes what React compares in its tearing checks.
-- **Outside render**, `getSnapshot` also runs the hook-local check on the records of a render that has not committed yet, and moves the counter if one fails. React's pre-commit consistency check then re-renders before commit, which is when v3's `isChanged` catches it today. Otherwise a write to a key first read in that render would be caught only in the layout effect.
+- **Render** uses the held snapshot, or calls `snapshot(p)` once if the counter moved since the snapshot was taken. The snapshot reflects every write the counter has seen. Keys first read in this render are covered by the checks below. Components still render only immutable snapshots; the counter only changes what React compares in its tearing checks.
+- **Outside render**, `getSnapshot` also runs the hook-local check on the records of a render that has not committed yet, and moves the counter if one fails.
+  - A flag on the hook, set around its own `useSyncExternalStore` call, tells the two cases apart, as v3's `inRender` flag does today.
+  - During render the check is off, because React calls `getSnapshot` twice there and warns, then loops, if the results differ. It runs in the store callback, React's pre-commit consistency check and the passive subscribe check.
+  - A moved counter is stored before `getSnapshot` returns, so repeated calls agree.
+  - React runs its pre-commit check only after a concurrent render. There, the check re-renders before commit, which is when v3's `isChanged` catches such a write today, including one made between two components' renders.
+  - A sync render has no pre-commit check. The layout-effect check puts its writes, which can come only from layout effects, on screen before paint.
 - An unrelated write never moves the counter, so React's consistency checks never copy the wide node.
 - **A new `p` argument** drops the held snapshot and its records, and takes `snapshot(p)`. The next commit swaps the subscriptions. Without this, a hook whose proxy was replaced would keep returning the detached proxy's snapshot, because nothing moves its counter.
 - **Late reads** are subscribed in a microtask, which also runs the same check on them.
@@ -389,11 +393,11 @@ A tracked snapshot passed as `next` from an event handler records late reads, an
 
 **`valtio/utils`**
 
-| Export                      | Change                                                  |
-| --------------------------- | ------------------------------------------------------- |
-| `applyChanges(proxy, next)` | New                                                     |
-| `subscribeInAsync(p, cb)`   | New, in PR a; today's microtask-batched delivery        |
-| `subscribeKey(p, key, cb)`  | Built on `{ keys }`; the `notifyInSync` argument throws |
+| Export                      | Change                                                   |
+| --------------------------- | -------------------------------------------------------- |
+| `applyChanges(proxy, next)` | New                                                      |
+| `subscribeInAsync`          | Proposed not to be added; `devtools` coalesces privately |
+| `subscribeKey(p, key, cb)`  | Built on `{ keys }`; the `notifyInSync` argument throws  |
 
 **Not added:**
 
@@ -408,8 +412,8 @@ A tracked snapshot passed as `next` from an event handler records late reads, an
 
 | v2 → v3 change                                                                        | Detection                                  | Remedy                                                                                                 |
 | ------------------------------------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
-| `subscribe` callbacks run synchronously on every write, instead of once per microtask | Docs                                       | `batch()`, or `subscribeInAsync` for the old delivery                                                  |
-| `subscribe(p, cb, true)`, `subscribeKey(…, true)`                                     | TypeScript error; runtime error (1)        | Drop it; use `batch()` or `subscribeInAsync`                                                           |
+| `subscribe` callbacks run synchronously on every write, instead of once per microtask | Docs                                       | `batch()`, or coalesce in the callback ([recipe](./v3-sync-notifications.md#migration))                |
+| `subscribe(p, cb, true)`, `subscribeKey(…, true)`                                     | TypeScript error; runtime error (1)        | Drop it; use `batch()` to group notifications                                                          |
 | `getVersion` removed                                                                  | TypeScript error; import error             | `isProxyObject(x)` for proxy checks; `snapshot(p)` identity or a `subscribe` flag for change detection |
 | `useSnapshot(p, { sync })`, `useProxy(p, { sync })`                                   | TypeScript error; runtime error (2)        | Drop it                                                                                                |
 | A snapshot or tracked snapshot assigned into state, or passed to `proxy()`            | Runtime error (3)                          | `deepClone`, `applyChanges`, or `ref`                                                                  |
@@ -426,7 +430,7 @@ A tracked snapshot passed as `next` from an event handler records late reads, an
 
 Runtime messages:
 
-1. `notifyInSync has been removed. subscribe() is synchronous. Use batch() to group notifications, or subscribeInAsync() from valtio/utils.`
+1. `notifyInSync has been removed. subscribe() is synchronous. Use batch() to group notifications.`
 2. `useSnapshot() no longer accepts an options argument. Updates are synchronous.`
 3. `Cannot assign a Valtio snapshot into a proxy. Copy it with deepClone(), merge it with applyChanges(), or wrap it with ref() to store it as is.`
 

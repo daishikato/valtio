@@ -5,8 +5,11 @@
 **Decided so far:**
 
 - Notifications become synchronous, and the `notifyInSync` and `sync` options go away.
-- `batch()` lands in vanilla, and `subscribeInAsync` in `valtio/utils`.
+- `batch()` lands in vanilla and returns `fn`'s result.
+- When subscriber callbacks throw, the delivery still finishes, and then an `AggregateError` is thrown.
 - In this PR, `useSnapshot` pays for a snapshot on every write that isn't batched. That cost is accepted until d5 removes it, with a `TODO` in the code and no workaround.
+
+**Proposed, to confirm:** don't add `subscribeInAsync` (see [Open question](#open-question)).
 
 ## Changes
 
@@ -14,7 +17,7 @@
 
 **`subscribe(p, callback)`**
 
-- The callback runs synchronously after each write. It receives `[op]`, or `[]` when ops are not enabled with `unstable_enableOp`.
+- The callback runs synchronously, before the write that triggered it returns. It receives `[op]`, or `[]` when ops are not enabled with `unstable_enableOp`.
 - The third parameter is removed from the types. Passing a boolean throws (message 1 below). `false` throws too, because the asynchronous delivery it selected no longer exists.
 
 **`batch(fn)` (new)**
@@ -22,43 +25,94 @@
 - `fn` runs synchronously, and `batch` returns its result.
 - Listeners are deferred until the outermost `batch` returns. Each subscription then runs once, with the ops of every write it would have heard, in write order. Nested `batch` calls join the outer one.
 - Versions still move on every write, so reads and `snapshot()` inside the batch see the writes immediately.
-- If `fn` throws, the pending notifications are still flushed, because the writes happened, and then the error propagates.
-- A subscription removed during the batch is skipped at flush time.
-- Writes made by a callback during the flush are delivered immediately, as outside a batch.
+- A subscription removed during the batch is skipped.
 - Only the synchronous part of an `async` function is batched.
 
-Implementation sketch: a module-level depth counter and a pending map from subscription to ops. The listener appends to the map while the depth is above zero, and calls the callback directly otherwise. `batch` flushes in a `finally` block when the depth returns to zero.
+**Delivery order**
+
+All notifications, batched or not, go through one delivery loop.
+
+- **Rounds.** A round runs every pending subscription once, in the order each was first notified.
+- **Writes made by callbacks** are queued for the next round, not delivered inside the current one. Every subscriber therefore sees writes in order, and a subscriber that hasn't received its batched ops yet can't see a later write first.
+- **One loop at a time.** A `batch()` called from a callback joins the running loop instead of starting another.
+- **Timing.** The loop ends when a round leaves nothing pending, still before the outermost write or `batch` returns.
+
+**Errors**
+
+- **Callback errors are collected.** The loop always finishes, so one failing subscriber doesn't silence the others.
+- **After the loop,** if any callback threw, an `AggregateError` with every callback error is thrown. For an unbatched write, the assignment throws it after the write has taken effect.
+- **Errors from `fn`:**
+  - If only `fn` threw, `batch` rethrows that error unchanged, after delivering the notifications for the writes it made.
+  - If `fn` and callbacks both threw, the `AggregateError` lists `fn`'s error first.
+
+`AggregateError` is an ES2021 global. The repo's TypeScript `lib` is `ESNext` and Node is 20 or later, so neither is a concern. Support on Hermes should be confirmed before release.
+
+**Implementation sketch.** Module-level state:
+
+- `depth`: the number of open `batch` calls
+- `delivering`: whether the loop is running
+- `pending`: a map from subscription to ops
+
+The pieces:
+
+- **Listener:** always appends its op to `pending`. It runs the loop itself only when `depth` is 0 and no loop is running.
+- **Loop:** swaps `pending` for a fresh map, runs each still-active subscription with its ops while collecting errors, and repeats until the fresh map stays empty. Then it throws as described above.
+- **`batch`:** increments `depth`, runs `fn`, and decrements in `finally`. It runs the loop only when `depth` is back to 0 and no loop is running.
 
 ### `valtio/utils`
 
 - **`subscribeKey(p, key, callback)`** is synchronous. Passing a boolean fourth argument throws.
-- **`subscribeInAsync(p, callback)`** is new, and reproduces today's default delivery. Ops are accumulated and the callback runs once in a microtask, skipped if the subscription was removed. It is built on `subscribe`.
-- **`devtools`** switches to `subscribeInAsync`, so a burst of writes stays one Redux DevTools message.
-- **`proxyMap` and `proxySet`** wrap `set`, `add`, `delete` and `clear` in `batch()`. Each of these writes `data`, `index` and `epoch` separately, so without `batch` a listener would run up to three times and see an index and data that don't match yet.
+- **`devtools`** coalesces a burst of writes into one Redux DevTools message with a private microtask helper, so its output doesn't change.
+- **`proxyMap` and `proxySet`** wrap `set`, `add`, `delete` and `clear` in `batch()`. Each of these writes `data`, `index` and `epoch` separately. Without `batch`, a listener would run up to three times and see an index and data that don't match yet.
 
 ### `valtio/react`
 
 - **`useSnapshot(p)`** takes no options. Passing any second argument throws (message 2). Its internal subscription is synchronous.
 - **`useProxy(p)`** in `valtio/react/utils` takes no options either, and throws the same way.
-- `getSnapshot` is unchanged. It gets a `TODO` saying that it takes a snapshot on every notification, and that d5 replaces it with a per-hook counter.
+- **`getSnapshot`** is unchanged. It gets a `TODO` saying that it takes a snapshot on every notification, and that d5 replaces it with a per-hook counter.
 
 ## Migration
 
-| Change                                                                                | Detection                           | Remedy                                                                        |
-| ------------------------------------------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------- |
-| `subscribe` callbacks run synchronously on every write, instead of once per microtask | Docs                                | `batch()` around multi-write code, or `subscribeInAsync` for the old delivery |
-| `subscribe(p, cb, true)` or `subscribe(p, cb, false)`                                 | TypeScript error; runtime error (1) | Drop the argument                                                             |
-| `subscribeKey(p, key, cb, true)`                                                      | TypeScript error; runtime error (1) | Drop the argument                                                             |
-| `useSnapshot(p, { sync })`, `useProxy(p, { sync })`                                   | TypeScript error; runtime error (2) | Drop the argument; updates are always synchronous                             |
-| A loop of writes without `batch()` makes `useSnapshot` take one snapshot per write    | Silent, slower                      | `batch()`; d5 removes the cost                                                |
-| `splice`, `sort` and other native array methods notify once per internal write        | Silent                              | `batch()`                                                                     |
-| The "controlled inputs may lose caret position" gotcha                                | Goes away                           | —                                                                             |
+| Change                                                                                   | Detection                           | Remedy                                                                  |
+| ---------------------------------------------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------- |
+| `subscribe` callbacks run synchronously on every write, instead of once per microtask    | Docs                                | `batch()` around multi-write code, or coalesce in the callback (recipe) |
+| A subscriber callback that throws now throws from the write, wrapped in `AggregateError` | The thrown error                    | Handle errors inside the callback                                       |
+| `subscribe(p, cb, true)` or `subscribe(p, cb, false)`                                    | TypeScript error; runtime error (1) | Drop the argument                                                       |
+| `subscribeKey(p, key, cb, true)`                                                         | TypeScript error; runtime error (1) | Drop the argument                                                       |
+| `useSnapshot(p, { sync })`, `useProxy(p, { sync })`                                      | TypeScript error; runtime error (2) | Drop the argument; updates are always synchronous                       |
+| A loop of writes without `batch()` makes `useSnapshot` take one snapshot per write       | Silent, slower                      | `batch()`; d5 removes the cost                                          |
+| `splice`, `sort` and other native array methods notify once per internal write           | Silent                              | `batch()`                                                               |
+| The "controlled inputs may lose caret position" gotcha                                   | Goes away                           | —                                                                       |
 
-The first row is the only silent semantic change, and it affects every `subscribe` user. It is the change #1177 asked for, so the migration guide should lead with it.
+The first row is the main silent semantic change, and it affects every `subscribe` user. It is the change #1177 asked for, so the migration guide should lead with it. The guide gives this recipe for code that wants the old coalesced delivery:
+
+```js
+const subscribeCoalesced = (p, callback) => {
+  const ops = []
+  let scheduled = false
+  let active = true
+  const unsubscribe = subscribe(p, (newOps) => {
+    ops.push(...newOps)
+    if (!scheduled) {
+      scheduled = true
+      queueMicrotask(() => {
+        scheduled = false
+        if (active) callback(ops.splice(0))
+      })
+    }
+  })
+  return () => {
+    active = false
+    unsubscribe()
+  }
+}
+```
+
+The docs PR adds a test for this recipe.
 
 Runtime messages:
 
-1. `notifyInSync has been removed. subscribe() is synchronous. Use batch() to group notifications, or subscribeInAsync() from valtio/utils.`
+1. `notifyInSync has been removed. subscribe() is synchronous. Use batch() to group notifications.`
 2. `useSnapshot() no longer accepts an options argument. Updates are synchronous.`
 
 `subscribeKey` and `useProxy` use the same messages with their own names.
@@ -87,25 +141,31 @@ Measured on `v3` at `fb594a1` with vitest, jsdom and a React 19.2.5 dev build, u
 - `subscribe` delivers synchronously, with one op per write.
 - `batch`:
   - nesting
-  - a thrown error
   - the return value
   - unsubscribing during the batch
   - `snapshot()` inside the batch
   - one callback with every op, in order
-- `subscribeInAsync` coalesces a burst into one callback, and is silent after unsubscribing.
+- Delivery order:
+  - A callback that writes doesn't let a later write reach another subscriber before its batched ops.
+  - A `batch` inside a callback joins the running loop.
+- Errors:
+  - Several throwing callbacks produce one `AggregateError`, and the remaining subscribers still run.
+  - A throwing `fn` alone is rethrown unchanged.
 - Every removed argument throws its message.
 - Each `proxyMap` and `proxySet` method notifies once, with the index and data already consistent.
-- `devtools` sends one message per burst.
+- `devtools` still sends one message per burst.
 
 ## Docs
 
-- `api/advanced/subscribe.mdx`: synchronous delivery, `batch`, `subscribeInAsync`.
-- New pages for `batch` and `subscribeInAsync`.
+- `api/advanced/subscribe.mdx`: synchronous delivery, `batch`, delivery order, errors, and the coalescing recipe.
+- A new page for `batch`.
 - `how-tos/some-gotchas.mdx`: remove the controlled-input caret section, since updates are always synchronous.
 - The v3 migration guide.
 
-## Open questions
+## Open question
 
-1. Should `batch(fn)` return `fn`'s result? Proposed: yes.
-2. If a callback throws during a flush, should the rest still run, with the first error rethrown afterwards? Proposed: yes, so that one failing subscriber doesn't silence the others.
-3. Should `subscribeInAsync` keep the two-argument signature for now? Proposed: yes. d2 can add `{ keys }` to it along with `subscribe`.
+**Should `subscribeInAsync` be added?** Proposed: no.
+
+- **Its only in-repo user is `devtools`,** which can coalesce with a private helper.
+- **Application code has other remedies.** It can wrap multi-write code in `batch()`, or coalesce inside its callback with the recipe above.
+- **It can be added later without breaking anything,** but it could not be removed later without breaking users. Given the strict review of new exports, the smaller API is the safer default.
