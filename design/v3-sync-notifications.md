@@ -17,7 +17,7 @@
 **`subscribe(p, callback)`**
 
 - The callback runs synchronously, before the write that triggered it returns. It receives `[op]`, or `[]` when ops are not enabled with `unstable_enableOp`.
-- The third parameter is removed from the types. Passing a boolean throws (message 1 below). `false` throws too, because the asynchronous delivery it selected no longer exists.
+- The third parameter is removed from the types. Passing a boolean throws (message 1 below). `false` throws too, because the asynchronous delivery it selected no longer exists. `subscribe(p, cb, undefined)` stays valid.
 
 **`batch(fn)` (new)**
 
@@ -54,20 +54,20 @@ All notifications, batched or not, go through one delivery loop.
 
 The pieces:
 
-- **Listener:** always appends its op to `pending`. It runs the loop itself only when `depth` is 0 and no loop is running.
+- **Listener:** records its subscription in `pending`, and appends the op only when ops are enabled. With ops off, the callback receives `[]`, never `[undefined]`. The listener runs the loop itself only when `depth` is 0 and no loop is running.
 - **Loop:** swaps `pending` for a fresh map, runs each still-active subscription with its ops while collecting errors, and repeats until the fresh map stays empty. Then it throws as described above.
 - **`batch`:** increments `depth`, runs `fn`, and decrements in `finally`. It runs the loop only when `depth` is back to 0 and no loop is running.
 
 ### `valtio/utils`
 
 - **`subscribeKey(p, key, callback)`** is synchronous. Passing a boolean fourth argument throws.
-- **`devtools`** coalesces a burst of writes into one Redux DevTools message with a private microtask helper, so its output doesn't change.
-- **`proxyMap` and `proxySet`** wrap `set`, `add`, `delete` and `clear` in `batch()`. Each of these writes `data`, `index` and `epoch` separately. Without `batch`, a listener would run up to three times and see an index and data that don't match yet.
+- **`devtools`** coalesces a burst of writes into one Redux DevTools message with a private microtask helper, so its output doesn't change. It keeps calling `unstable_enableOp()`, which its action names depend on.
+- **`proxyMap` and `proxySet`** wrap `set`, `add`, `delete` and `clear` in `batch()`. Each of these writes `data`, `index` and `epoch` separately. Without `batch`, a listener would run up to three times and see an index and data that don't match yet. A call that writes nothing, such as `add` of a value already present or `delete` of a missing key, doesn't notify.
 
 ### `valtio/react`
 
-- **`useSnapshot(p)`** takes no options. Passing any second argument throws (message 2). Its internal subscription is synchronous.
-- **`useProxy(p)`** in `valtio/react/utils` takes no options either, and throws the same way.
+- **`useSnapshot(p)`** takes no options. A second argument that isn't `undefined` throws (message 2). The check is on the value, not on whether an argument was passed, because `useProxy` forwards its own `options` even when the caller omitted it. Its internal subscription is synchronous.
+- **`useProxy(p)`** in `valtio/react/utils` takes no options either, and throws the same way when `options` isn't `undefined`.
 - **`getSnapshot`** is unchanged. It gets a `TODO` saying that it takes a snapshot on every notification, and that d5 replaces it with a per-hook counter.
 
 ## Migration
@@ -150,8 +150,11 @@ Measured on `v3` at `fb594a1` with vitest, jsdom and a React 19.2.5 dev build, u
 - Errors:
   - Several throwing callbacks produce one `AggregateError`, and the remaining subscribers still run.
   - A throwing `fn` alone is rethrown unchanged.
+  - When `fn` and a callback both throw, one `AggregateError` lists `fn`'s error first, and the other subscribers still ran.
+- With ops disabled, callbacks receive `[]`.
+- `subscribe(p, cb, undefined)`, `useSnapshot(p, undefined)` and `useProxy(p)` don't throw.
 - Every removed argument throws its message.
-- Each `proxyMap` and `proxySet` method notifies once, with the index and data already consistent.
+- Each `proxyMap` and `proxySet` method that writes notifies once, after `data`, `index` and `epoch` all match. A call that writes nothing doesn't notify.
 - `devtools` still sends one message per burst.
 
 ## Docs
