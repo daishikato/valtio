@@ -272,8 +272,11 @@ describe('gotchas: React.memo with object props', () => {
     expect(screen.getByText('value: b')).toBeInTheDocument()
     expect(parentRender).toHaveBeenCalledTimes(1)
 
-    state.second = 'c'
-    await act(() => vi.advanceTimersByTimeAsync(0))
+    // The write notifies synchronously, so make it inside act. On React 18,
+    // a store update outside act renders once more in tests.
+    await act(async () => {
+      state.second = 'c'
+    })
     expect(screen.getByText('value: c')).toBeInTheDocument()
     expect(parentRender).toHaveBeenCalledTimes(2)
   })
