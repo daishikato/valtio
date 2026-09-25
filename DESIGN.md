@@ -221,13 +221,14 @@ Each tracked node wraps a snapshot object `Sₙ` and is bound to the live proxy 
 | `t.k`, an accessor, own or inherited                      | Nothing for `k`; the getter runs with `t` as `this` | Its reads' records  | Its reads' checks             |
 | `t.k`, an inherited non-accessor, such as `map`           | Nothing                                             | —                   | —                             |
 | `'k' in t`, `Object.hasOwn(t, k)`                         | Presence seen                                       | Key `k` on `Pₙ`     | Same presence on `Pₙ`         |
-| `Object.keys(t)`, `for...in`, spread                      | Own-key list seen                                   | `{ ownKeys: true }` | Same list on `Pₙ`             |
+| `Object.keys(t)`, `for...in`                              | Own-key list seen                                   | `{ ownKeys: true }` | Same list on `Pₙ`             |
 | A bound node with no reads under it, or `trackKey(t.obj)` | Container: the snapshot seen                        | Subtree on `C`      | `snapshot(C) === seen`        |
 | A snapshot's non-enumerable own symbol, such as the brand | Nothing                                             | —                   | —                             |
 
 - **Containers:** the "no reads under it" rule gives v2's identity semantics to a node that is only passed on, such as an effect dependency or a prop to a memoized child that never rendered against this snapshot.
 - **Snapshot identity, not `getVersion(C)`,** is the container check. A version read at render time can already include a write that the held snapshot does not show, so it would pass while the render used stale data.
 - **`trackKey(t.obj)`:** forces a container record for `t.obj` and returns it. It is a drop-in for `trackMemo(t.obj)`, where a component reads `t.obj.x` but also depends on the identity of `t.obj`.
+- **Spread, `Object.entries` and `JSON.stringify`** list the own keys and then get each value, so they record the key list plus a leaf or path per value, and re-render on a value write.
 - **Accessor keys** are never value-compared. An object-returning getter returns a new identity on each access, so comparing it would re-render forever.
 - **Tracked proxies** are cached per hook by snapshot object. An unchanged subtree keeps its identity across renders, so `memo` bails out.
 - **Dev only:** the recorded keys are listed with `useDebugValue`.
