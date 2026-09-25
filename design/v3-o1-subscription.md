@@ -55,7 +55,7 @@ These are the decisions the design needs from you. Each one states the proposed 
    - Proposed: document the [item-hook pattern](#the-item-hook-pattern). It uses public APIs only.
    - Alternative: ship the recipe as a small hook in `valtio/react/utils`. It adds no vanilla API, but it is one more export.
    - Alternative: `useSnapshot` subscribes itself to the parent key that currently points at its proxy. That needs a new public vanilla signal, because parent links are internal. It also helps only components that re-derive the proxy during render.
-8. **Changed-keys shape:** `{ keys: true }` for every direct key, and the changed keys as the callback argument of key-level subscriptions. See [Dropping ops](#dropping-ops).
+8. **Changed-keys shape:** `{ keys: true }` for every direct key, and the changed keys as the callback argument of key-level subscriptions. The reviewer checked it against valtio-y 1.1.3 and valtio-yjs 0.7.0 and agrees it is enough for both. See [Dropping ops](#dropping-ops).
 9. **Your remaining preferences**, major and minor.
 
 ### Decided
@@ -184,18 +184,21 @@ The alternative is linking every child at creation. It only makes a difference f
 ### Listeners
 
 ```js
-subscribe(p, callback) // any write in p's subtree
-subscribe(p, callback, { keys: ['a', 'b'] }) // direct set or delete of a or b on p
+subscribe(p, callback) // any write in p's subtree; callback()
+subscribe(p, callback, { keys: ['a', 'b'] }) // direct set or delete of a or b on p; callback(changedKeys)
+subscribe(p, callback, { keys: true }) // direct set or delete of any key of p; callback(changedKeys)
 subscribe(p, callback, { ownKeys: true }) // an own key of p added or removed
 ```
 
-| Listener  | Fires on                                                                                    | Does not fire on                                      | Registration      |
-| --------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ----------------- |
-| Subtree   | Any write in `p`'s subtree                                                                  | —                                                     | O(1) once linked  |
-| `keys`    | A direct set or delete of a listed key, including implicit ones such as `length`            | Sibling keys; writes under a child                    | O(number of keys) |
-| `ownKeys` | An own key added or removed, including an index that appears or disappears through `length` | Value writes; replacing a child under an existing key | O(1)              |
+| Listener  | Fires on                                                                                                    | Does not fire on                                      | Registration                       |
+| --------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ---------------------------------- |
+| Subtree   | Any write in `p`'s subtree                                                                                  | —                                                     | O(1) once linked                   |
+| `keys`    | A direct set or delete of a listed key, or of any key with `true`, including implicit ones such as `length` | Sibling keys; writes under a child                    | O(number of keys), O(1) for `true` |
+| `ownKeys` | An own key added or removed, including an index that appears or disappears through `length`                 | Value writes; replacing a child under an existing key | O(1)                               |
 
 - `keys` and `ownKeys` combine in one call. React makes one registration per proxy it read.
+- `keys` is `true | readonly (string | symbol)[]`. The check is `keys === true`; any other non-array value throws, so `keys: false` or a bare string never means "every key".
+- A `keys` callback receives the direct keys that changed since its last call, each once, as strings and symbols: array indices as `'0'`, `'1'`, …, and `'length'`. Order is not significant. With a list, only the listed keys are reported, and the callback does not run when none of them changed. A callback without a parameter stays valid; React only needs the wake-up.
 - Every listener is synchronous. Inside `batch()`, it is deferred until the outermost `batch` returns and then runs once. State is visible to reads immediately; nested `batch` calls join the outer one.
 - A same-value `set`, or a `delete` of an absent key, notifies nobody.
 - Replacing `state.child` notifies `state`'s `child` key and its subtree listeners. The old child's own listeners stay silent, because it was detached rather than mutated.
@@ -221,11 +224,29 @@ Decided: ops and `unstable_enableOp` are removed. Ops cost a path array per writ
 Proposal, landing in d2 with the key-level subscriptions:
 
 - `subscribe(p, cb)` calls `cb()` with no arguments.
-- A key-level subscription passes the direct keys that changed since its last call, each once: `subscribe(p, (keys) => …, { keys: ['a', 'b'] })`. `{ keys: true }` hears every direct key of `p`.
-- A binding reads the current value from the proxy, and treats a key that is no longer `in p` as deleted. Inside `batch`, a key written several times is reported once, and the proxy already holds its final value.
-- For arrays, the changed keys are indices and `length`. A binding turns them into inserts and deletes by diffing against its own mirror, for example from the common prefix and suffix, instead of reconstructing them from op sequences.
-- With no new API at all, a binding can instead diff consecutive snapshots. That costs O(width) of each changed container per notification, where changed keys cost O(changed keys).
-- Detection (R2): passing a callback that declares a parameter to `subscribe(p, cb)` is a TypeScript error, and importing `unstable_enableOp` fails.
+- A key-level subscription passes the changed direct keys, as described under [Listeners](#listeners). `{ keys: true }` hears every direct key of `p`. A binding does not need `{ ownKeys: true }`, which does not fire when an existing key's value changes.
+- A binding subscribes per container proxy, as valtio-y does today. A root `subscribe(p, cb)` cannot name the nested key that changed without walking the tree, so valtio-yjs's single root subscription becomes one subscription per bound container.
+
+**Maps.** The changed keys are the delta.
+
+- `key in p` decides set versus delete. `p[key] === undefined` is a set of `undefined`, not a delete.
+- The new value is `p[key]` at callback time. Inside `batch`, a key written several times is reported once and the proxy holds its final value, which is the last-write-wins that valtio-y's `planMapOps` already applies.
+- Rollback reads previous values from the Y type, which is not yet updated when validation throws. The binding reads those entries before enqueueing, because after a successful `yMap.set` they are no longer previous.
+  - A missing Y key means the proxy key was new, so rollback deletes it.
+  - For a nested container, the previous value is the proxy the binding already keeps for that `Y.Map` or `Y.Array` (valtio-y's `getOrCreateValtioProxy`), not the Y value and not its `toJSON()`.
+- valtio-y reads an op's previous value only for this map rollback. Its array rollback already resyncs from `yArray.toArray()`.
+
+**Arrays.** The changed keys are only the signal to diff that array. An `unshift` changes every index, so the list is O(length) and is not an edit script.
+
+- The binding diffs the proxy array against the `Y.Array` and computes a real edit script.
+- Nested containers are matched by identity: the proxy bound to each Y item. Primitives are matched by value. Matching containers by deep equality, as valtio-yjs does today, can bind an existing Y item to a new, equal object.
+- A common prefix and suffix is a fast path for one contiguous edit, such as `push`, `pop` or a single `splice`. Several edit regions in one batch, such as `sort` or two splices, need the full diff. Rewriting the middle instead gives the items new Yjs identities and drops concurrent edits to them, which is what valtio-yjs's `parseProxyOps` exists to avoid.
+
+**`devtools`** names `set:` and `delete:` paths by diffing the previous snapshot against the current one. It already keeps the previous snapshot for each message.
+
+**Fallback.** With no new API at all, a binding can diff consecutive snapshots. That costs O(width) of each changed container per notification, where changed keys cost O(changed keys).
+
+**Detection (R2):** passing a callback that declares a parameter to `subscribe(p, cb)` is a TypeScript error, and importing `unstable_enableOp` fails.
 
 Both packages need a v3 release anyway: valtio-y passes `true` as `subscribe`'s third argument, which PR a makes throw, and valtio-yjs calls `getVersion`, which PR b removes.
 
@@ -398,15 +419,15 @@ A tracked snapshot passed as `next` from an event handler records late reads, an
 
 **`valtio` / `valtio/vanilla`**
 
-| Export                       | Change                                                                                                                                         |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `subscribe(p, cb, options?)` | The boolean third argument throws; `{ keys, ownKeys }` replaces it. The callback receives no ops; key-level callbacks receive the changed keys |
-| `batch(fn)`                  | New, in PR a                                                                                                                                   |
-| `isProxyObject(x)`           | New                                                                                                                                            |
-| `unstable_isRef(x)`          | New                                                                                                                                            |
-| `getVersion(p)`              | Removed in PR b. Use `isProxyObject(x)` for proxy checks, and `snapshot(p)` identity or a `subscribe` flag for change detection                |
-| `unstable_getInternalStates` | Gains the snapshot brand, for `deepClone` and `applyChanges`; other contents change                                                            |
-| `unstable_enableOp`          | Removed in d2                                                                                                                                  |
+| Export                       | Change                                                                                                                                                                                 |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `subscribe(p, cb, options?)` | The boolean third argument throws; `{ keys, ownKeys }` replaces it, with `keys: true` for every direct key. The callback receives no ops; key-level callbacks receive the changed keys |
+| `batch(fn)`                  | New, in PR a                                                                                                                                                                           |
+| `isProxyObject(x)`           | New                                                                                                                                                                                    |
+| `unstable_isRef(x)`          | New                                                                                                                                                                                    |
+| `getVersion(p)`              | Removed in PR b. Use `isProxyObject(x)` for proxy checks, and `snapshot(p)` identity or a `subscribe` flag for change detection                                                        |
+| `unstable_getInternalStates` | Gains the snapshot brand, for `deepClone` and `applyChanges`; other contents change                                                                                                    |
+| `unstable_enableOp`          | Removed in d2                                                                                                                                                                          |
 
 **`valtio/react`**
 
@@ -512,6 +533,13 @@ Each item becomes a test in the PR it covers.
   - Accessors are skipped.
   - A collection snapshot throws.
 - **Collections**: `get`, `has` and `size` agree through a wrapper after later writes, and a value-only `set` leaves `has` readers quiet.
+- **Changed keys (d2):**
+  - `{ keys: true }` reports each changed direct key once per call, including a value change of an existing key, and never a nested write.
+  - A list reports only the intersection, and does not run when it is empty.
+  - `keys: false` and a string throw.
+  - Array writes report indices and `'length'`.
+  - A set to `undefined` stays `in p`.
+- **Binding sketch (d2)**: a minimal Y.Map / Y.Array binding built on `{ keys: true }` round-trips `push`, `unshift` of a value equal to the tail, `sort`, and two splices in one `batch`, and keeps Y item identity for moved containers.
 - **Tearing (d5)**: run the tearing checks from will-this-react-global-state-work-in-concurrent-rendering, since the suite covers concurrent rendering only partly.
 - **Burst of writes (d5)**: the loop from the [appendix](#appendix-evidence-and-references) takes no per-write snapshot.
 - **Bundle**: report minified and gzipped sizes against `v3` plus proxy-compare (6,188 / 2,985 B) and the WIP candidate (10,533 / 4,431 B).
