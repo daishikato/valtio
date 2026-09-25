@@ -50,8 +50,9 @@ These are the decisions the design needs from you. Each one states the proposed 
 5. **Names:** `trackKey`, `ownKeys`, `subscribeInAsync`, `unstable_isRef`.
 6. **Delivery:** should lazy parent links ship as their own PR first? They are vanilla-only, change no API, and make `snapshot()` faster today.
 7. **Collections:** keep the index in state, following the `versioned-index` branch? This is proposed over a private-symbol copy of the index.
-8. **Following replacement.** `useSnapshot(state.items[id])` keeps listening to a detached item after `state.items[id]` is replaced, which is also true in v3 today. There are two options:
+8. **Following replacement.** `useSnapshot(state.items[id])` keeps listening to a detached item after `state.items[id]` is replaced, which is also true in v3 today. There are three options:
    - Proposed: document the [item-hook pattern](#the-item-hook-pattern). It uses public APIs only.
+   - Alternative: ship the recipe as a small hook in `valtio/react/utils`. It adds no vanilla API, but it is one more export.
    - Alternative: `useSnapshot` subscribes itself to the parent key that currently points at its proxy. That needs a new public vanilla signal, because parent links are internal. It also helps only components that re-derive the proxy during render.
 9. **Your remaining preferences**, major and minor.
 
@@ -111,21 +112,24 @@ These are medians of 15 writes, measured with vitest and jsdom on a React 19 dev
 
 Calling `useSnapshot(state.items[id])` alone is not enough. After `state.items[id] = next`, the hook still listens to the detached proxy. The list parent doesn't hear the replacement either, because the key list is unchanged. The item then keeps rendering the old object. v3 has the same gap today.
 
-The item also has to follow its key on the parent. With `{ keys }`, public APIs are enough, and no new export is needed:
+The item also has to follow its key on the parent. With `{ keys }`, public APIs are enough. The recipe subscribes in a layout effect, as `useSnapshot` does, so a replacement made in a layout effect is on screen before paint:
 
 ```js
 const useItem = (parent, key) => {
-  const item = useSyncExternalStore(
-    useCallback((cb) => subscribe(parent, cb, { keys: [key] }), [parent, key]),
-    () => parent[key],
-  )
+  const item = parent[key]
+  const [, rerender] = useReducer((n) => n + 1, 0)
+  useLayoutEffect(() => {
+    const unsubscribe = subscribe(parent, rerender, { keys: [key] })
+    if (parent[key] !== item) rerender() // replaced after this render read it
+    return unsubscribe
+  }, [parent, key, item])
   return useSnapshot(item)
 }
 ```
 
 - A leaf write wakes only that item's hook and snapshots only that item.
-- Replacing `state.items[id]` wakes only that item, which switches to the new proxy.
-- Adding or removing a key wakes the list parent through `{ ownKeys: true }`, which takes one O(N) snapshot of `items`.
+- Replacing `state.items[id]` wakes only that item, which switches to the new proxy. That relies on `useSnapshot` dropping its held snapshot when its argument changes ([Between commits](#between-commits)).
+- Adding or removing a key wakes the list parent through `{ ownKeys: true }`, which takes one O(N) snapshot of `items`. Removal unmounts the row in the same render, so `parent[key]` is always a proxy while the row is mounted.
 
 The parent must not pass `snap.items[id]` without reading it. Under the container rule, that subscribes the parent to the whole item and wakes it on every leaf write.
 
@@ -311,6 +315,7 @@ After each commit, the held snapshot agrees with live state on every installed r
 
 - **Listeners** mark the held snapshot stale and notify React. They go through `useSyncExternalStore`'s callback, or on mount, before that callback exists, through a state update.
 - **`getSnapshot`** returns the held snapshot until it is stale, then takes `snapshot(p)` once. An unrelated write never changes what it returns, so React's consistency checks never copy the wide node.
+- **A new `p` argument** drops the held snapshot and its records, and takes `snapshot(p)`. The next commit swaps the subscriptions. Without this, a hook whose proxy was replaced would keep returning the detached proxy's snapshot, because nothing marks it stale.
 - **Late reads** are subscribed in a microtask, which also runs the same check on them.
   - They only add subscriptions, and never narrow a container.
   - They are dropped when the snapshot changes.
@@ -446,7 +451,7 @@ Each item becomes a test in the commit it covers.
 - **#1160 benchmark**, committed this time. It covers both component patterns at N = 1,000, 5,000 and 50,000, and reports components woken, write-to-commit time, and `snapshot` calls per write.
 - **Render→commit gaps.** A child's layout effect, and a later sibling's, each write a key first read in this render. Both writes are in the DOM before the passive phase.
 - **Renders that never commit**: Strict Mode, an interrupted transition, and a render that suspends. A render that took a new snapshot leaves no listener behind. A render on the committed snapshot adds only late reads, which are dropped when the snapshot changes.
-- **Item-hook pattern**: replacing `state.items[id]` updates that item, and a leaf write wakes neither the list parent nor other items.
+- **Item-hook pattern**: replacing `state.items[id]` updates that item, including from a layout effect, before paint. A leaf write wakes neither the list parent nor other items.
 - **`<Activity>`**: hide, write, show. The first visible commit has the new value.
 - **Memoized children.** Cover three cases, and no update may be missed in any of them:
   - reads in the same pass
