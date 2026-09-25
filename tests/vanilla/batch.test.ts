@@ -1,0 +1,239 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { batch, proxy, snapshot, subscribe, unstable_enableOp } from 'valtio'
+import { subscribeKey } from 'valtio/utils'
+
+describe('batch', () => {
+  afterEach(() => {
+    unstable_enableOp(false)
+  })
+
+  it('should return the result of fn', () => {
+    expect(batch(() => 42)).toBe(42)
+  })
+
+  it('should notify once after the outermost batch returns', () => {
+    const state = proxy({ a: 0, b: 0 })
+    const handler = vi.fn()
+    subscribe(state, handler)
+
+    batch(() => {
+      state.a = 1
+      batch(() => {
+        state.b = 1
+      })
+      expect(handler).not.toHaveBeenCalled()
+    })
+
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it('should make writes visible to reads and snapshot inside the batch', () => {
+    const state = proxy({ count: 0 })
+    batch(() => {
+      state.count = 1
+      expect(state.count).toBe(1)
+      expect(snapshot(state).count).toBe(1)
+    })
+  })
+
+  it('should deliver every op in write order in one callback', () => {
+    unstable_enableOp(true)
+    const state = proxy({ a: 0, b: 0 })
+    const handler = vi.fn()
+    subscribe(state, handler)
+
+    batch(() => {
+      state.a = 1
+      state.b = 1
+      state.a = 2
+    })
+
+    expect(handler).toHaveBeenCalledExactlyOnceWith([
+      ['set', ['a'], 1, 0],
+      ['set', ['b'], 1, 0],
+      ['set', ['a'], 2, 1],
+    ])
+  })
+
+  it('should deliver an empty ops array when ops are disabled', () => {
+    const state = proxy({ count: 0 })
+    const handler = vi.fn()
+    subscribe(state, handler)
+
+    state.count = 1
+
+    expect(handler).toHaveBeenCalledExactlyOnceWith([])
+  })
+})
+
+describe('delivery order', () => {
+  afterEach(() => {
+    unstable_enableOp(false)
+  })
+
+  it.each([
+    ['a batched write', (fn: () => void) => batch(fn)],
+    ['an unbatched write', (fn: () => void) => fn()],
+  ])(
+    'should not let a write made by a callback overtake earlier ops (%s)',
+    (_, run) => {
+      unstable_enableOp(true)
+      const state = proxy({ a: 0, b: 0 })
+      subscribe(state, (ops) => {
+        if (ops.some(([, path]) => path[0] === 'a')) {
+          state.b = 1
+        }
+      })
+      const seen: unknown[] = []
+      subscribe(state, (ops) => {
+        seen.push(ops.map(([, path]) => path[0]))
+      })
+
+      run(() => {
+        state.a = 1
+      })
+
+      expect(seen).toEqual([['a'], ['b']])
+    },
+  )
+
+  it('should return from a batch called in a callback before its listeners run', () => {
+    unstable_enableOp(true)
+    const state = proxy({ a: 0, b: 0 })
+    const seen: string[] = []
+    let seenWhenInnerBatchReturned: string[] | undefined
+    subscribe(state, () => {
+      if (state.b === 0) {
+        batch(() => {
+          state.b = 1
+        })
+        seenWhenInnerBatchReturned = [...seen]
+      }
+    })
+    subscribe(state, (ops) => {
+      ops.forEach(([, path]) => seen.push(String(path[0])))
+    })
+
+    state.a = 1
+
+    expect(seenWhenInnerBatchReturned).toEqual([])
+    expect(seen).toEqual(['a', 'b'])
+  })
+
+  it('should skip a subscription removed before its round runs', () => {
+    const state = proxy({ count: 0 })
+    const handler = vi.fn()
+    let unsubscribe: () => void = () => {}
+    subscribe(state, () => {
+      unsubscribe()
+    })
+    unsubscribe = subscribe(state, handler)
+
+    state.count = 1
+
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('should notify once per internal write of native array methods without batch', () => {
+    const state = proxy([0, 1, 2, 3])
+    const handler = vi.fn()
+    subscribe(state, handler)
+
+    state.splice(1, 2)
+
+    expect(handler.mock.calls.length).toBeGreaterThan(1)
+  })
+})
+
+describe('errors', () => {
+  it('should run the other subscribers and throw an AggregateError', () => {
+    const state = proxy({ count: 0 })
+    const error1 = new Error('first')
+    const error2 = new Error('second')
+    const handler = vi.fn()
+    subscribe(state, () => {
+      throw error1
+    })
+    subscribe(state, handler)
+    subscribe(state, () => {
+      throw error2
+    })
+
+    let thrown: unknown
+    try {
+      state.count = 1
+    } catch (e) {
+      thrown = e
+    }
+
+    expect(state.count).toBe(1)
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(thrown).toBeInstanceOf(AggregateError)
+    expect((thrown as AggregateError).errors).toEqual([error1, error2])
+  })
+
+  it('should rethrow an error from fn unchanged after delivering its writes', () => {
+    const state = proxy({ count: 0 })
+    const handler = vi.fn()
+    subscribe(state, handler)
+    const error = new Error('fn')
+
+    expect(() =>
+      batch(() => {
+        state.count = 1
+        throw error
+      }),
+    ).toThrow(error)
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it('should list the error from fn first when a callback also throws', () => {
+    const state = proxy({ count: 0 })
+    const fnError = new Error('fn')
+    const callbackError = new Error('callback')
+    const handler = vi.fn()
+    subscribe(state, () => {
+      throw callbackError
+    })
+    subscribe(state, handler)
+
+    let thrown: unknown
+    try {
+      batch(() => {
+        state.count = 1
+        throw fnError
+      })
+    } catch (e) {
+      thrown = e
+    }
+
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(thrown).toBeInstanceOf(AggregateError)
+    expect((thrown as AggregateError).errors).toEqual([fnError, callbackError])
+  })
+})
+
+describe('removed arguments', () => {
+  const message =
+    'notifyInSync has been removed. subscribe() is synchronous. Use batch() to group notifications.'
+
+  it.each([true, false])('should throw for subscribe(p, cb, %s)', (value) => {
+    const state = proxy({ count: 0 })
+    expect(() => (subscribe as any)(state, () => {}, value)).toThrow(message)
+  })
+
+  it('should accept an explicit undefined third argument', () => {
+    const state = proxy({ count: 0 })
+    const handler = vi.fn()
+    ;(subscribe as any)(state, handler, undefined)
+    state.count = 1
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it('should throw for a boolean fourth argument of subscribeKey', () => {
+    const state = proxy({ count: 0 })
+    expect(() => (subscribeKey as any)(state, 'count', () => {}, true)).toThrow(
+      'notifyInSync has been removed. subscribeKey() is synchronous. Use batch() to group notifications.',
+    )
+  })
+})

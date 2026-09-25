@@ -1,4 +1,4 @@
-import { proxy, unstable_getInternalStates } from '../../vanilla.js'
+import { batch, proxy, unstable_getInternalStates } from '../../vanilla.js'
 
 const { proxyStateMap, snapCache } = unstable_getInternalStates()
 const isProxy = (x: any) => proxyStateMap.has(x)
@@ -109,14 +109,16 @@ export function proxyMap<K, V>(entries?: Iterable<[K, V]> | undefined | null) {
       if (!isProxy(this)) {
         throw new Error('Cannot perform mutations on a snapshot')
       }
-      const index = indexMap.get(key)
-      if (index === undefined) {
-        indexMap.set(key, this.index)
-        this.data[this.index++] = value
-      } else {
-        this.data[index] = value
-      }
-      this.epoch++
+      batch(() => {
+        const index = indexMap.get(key)
+        if (index === undefined) {
+          indexMap.set(key, this.index)
+          this.data[this.index++] = value
+        } else {
+          this.data[index] = value
+        }
+        this.epoch++
+      })
       return this
     },
     delete(key: K) {
@@ -127,19 +129,23 @@ export function proxyMap<K, V>(entries?: Iterable<[K, V]> | undefined | null) {
       if (index === undefined) {
         return false
       }
-      delete this.data[index]
-      indexMap.delete(key)
-      this.epoch++
+      batch(() => {
+        delete this.data[index]
+        indexMap.delete(key)
+        this.epoch++
+      })
       return true
     },
     clear() {
       if (!isProxy(this)) {
         throw new Error('Cannot perform mutations on a snapshot')
       }
-      this.data.length = 0 // empty array
-      this.index = 0
-      this.epoch++
-      indexMap.clear()
+      batch(() => {
+        this.data.length = 0 // empty array
+        this.index = 0
+        this.epoch++
+        indexMap.clear()
+      })
     },
     forEach(cb: (value: V, key: K, map: Map<K, V>) => void) {
       this.epoch // touch property for tracking

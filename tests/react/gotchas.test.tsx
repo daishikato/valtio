@@ -140,7 +140,7 @@ describe('gotchas: sync option', () => {
     const state = proxy({ text: 'hello' })
 
     const Input = () => {
-      const tracked = useSnapshot(state, { sync: true })
+      const tracked = useSnapshot(state)
       return (
         <input
           aria-label="text"

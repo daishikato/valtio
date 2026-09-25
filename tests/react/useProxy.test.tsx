@@ -159,7 +159,7 @@ describe('useProxy', () => {
     const state = proxy({ count: 0 })
 
     const Counter = () => {
-      const store = useProxy(state, { sync: true })
+      const store = useProxy(state)
       return (
         <>
           <div>count: {store.count}</div>
