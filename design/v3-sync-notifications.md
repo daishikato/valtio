@@ -84,7 +84,7 @@ The pieces:
 | `splice`, `sort` and other native array methods notify once per internal write           | Silent                              | `batch()`                                                               |
 | The "controlled inputs may lose caret position" gotcha                                   | Goes away                           | —                                                                       |
 
-The first row is the main silent semantic change, and it affects every `subscribe` user. It is the change #1177 asked for, so the migration guide should lead with it. The guide gives this recipe for code that wants the old coalesced delivery:
+The first row is the main silent semantic change, and it affects every `subscribe` user. It is the change #1177 asked for, so it gets its own section in the migration guide. The `subscribe` page gives this recipe for code that wants the old coalesced delivery:
 
 ```js
 const subscribeCoalesced = (p, callback) => {
@@ -163,7 +163,7 @@ Measured on `v3` at `fb594a1` with vitest, jsdom and a React 19.2.5 dev build, u
 - `api/advanced/subscribe.mdx`: synchronous delivery, `batch`, delivery order, errors, and the coalescing recipe.
 - A new page for `batch`.
 - `how-tos/some-gotchas.mdx`: remove the controlled-input caret section, since updates are always synchronous.
-- The v3 migration guide.
+- The v3 migration guide, which is now on `v3`: a "Notifications are synchronous" section after the `watch` removal.
 
 ## Not added: `subscribeInAsync`
 

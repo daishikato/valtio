@@ -160,7 +160,7 @@ Each step is its own PR into `v3`, reviewed and merged before the next one start
 | d6  | `applyChanges`                                                                                                                                         | a, d3       | Lands before d5, so the quiet path for replacement exists before the equal-replacement break                                                   |
 | d5  | The React switch: new tracker, `trackKey`, counter-based `getSnapshot`                                                                                 | b, c, d1–d4 | Removes the embedded `isChanged` path, the `getUntracked` and `trackMemo` re-exports, and vanilla's `markToTrack` call                         |
 
-Each PR updates the docs for what it changes. A final pass assembles the migration guide and documents the item-hook pattern. Tests from the WIP branches are ported into the PR whose behavior they cover.
+Each PR updates the docs for what it changes, including its section of the migration guide that is now on `v3`. A final pass reviews the guide as a whole and documents the item-hook pattern. Tests from the WIP branches are ported into the PR whose behavior they cover.
 
 ## Vanilla
 
