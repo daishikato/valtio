@@ -35,6 +35,53 @@ subscribe(state.arr, () => console.log('state.arr has changed to', state.arr))
 state.arr.push('world')
 ```
 
+## Notifications are synchronous
+
+The callback runs synchronously after each change, before the assignment returns. Several changes notify several times, unless they are wrapped in [`batch`](./batch):
+
+```js
+import { batch, proxy, subscribe } from 'valtio'
+
+const state = proxy({ a: 0, b: 0 })
+subscribe(state, () => console.log('changed'))
+
+state.a = 1 // logs 'changed'
+state.b = 1 // logs 'changed'
+
+batch(() => {
+  state.a = 2
+  state.b = 2
+}) // logs 'changed' once
+```
+
+Each subscriber receives changes in the order they were made. A change made inside a callback is delivered after every subscriber has received the current change.
+
+If callbacks throw, the other subscribers still run, and the errors are then thrown together as an `AggregateError` from the assignment (or from `batch`).
+
+If you prefer to be notified once per microtask, as in Valtio v2, coalesce inside your callback:
+
+```js
+const subscribeCoalesced = (proxyObject, callback) => {
+  const ops = []
+  let scheduled = false
+  let active = true
+  const unsubscribe = subscribe(proxyObject, (newOps) => {
+    ops.push(...newOps)
+    if (!scheduled) {
+      scheduled = true
+      queueMicrotask(() => {
+        scheduled = false
+        if (active) callback(ops.splice(0))
+      })
+    }
+  })
+  return () => {
+    active = false
+    unsubscribe()
+  }
+}
+```
+
 ## Codesandbox demo in VanillaJS
 
 https://codesandbox.io/s/valtio-photo-booth-demo-forked-xp8hs?file=/src/main.js

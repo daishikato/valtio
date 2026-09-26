@@ -1,4 +1,5 @@
 import { snapshot, subscribe, unstable_enableOp } from '../../vanilla.js'
+import type { INTERNAL_Op } from '../../vanilla.js'
 import type {} from '@redux-devtools/extension'
 
 // FIXME https://github.com/reduxjs/redux-devtools/issues/1097
@@ -20,6 +21,33 @@ type Options = {
   enabled?: boolean
   name?: string
 } & Config
+
+// subscribe() is synchronous, so coalesce a burst of writes into one
+// callback to keep sending one devtools message per burst.
+const subscribeCoalesced = (
+  proxyObject: object,
+  callback: (unstable_ops: INTERNAL_Op[]) => void,
+): (() => void) => {
+  const ops: INTERNAL_Op[] = []
+  let scheduled = false
+  let active = true
+  const unsubscribe = subscribe(proxyObject, (newOps) => {
+    ops.push(...newOps)
+    if (!scheduled) {
+      scheduled = true
+      Promise.resolve().then(() => {
+        scheduled = false
+        if (active) {
+          callback(ops.splice(0))
+        }
+      })
+    }
+  })
+  return () => {
+    active = false
+    unsubscribe()
+  }
+}
 
 /**
  * Connects a proxy object to Redux DevTools Extension for state debugging
@@ -58,7 +86,7 @@ export function devtools<T extends object>(
   unstable_enableOp()
   let isTimeTraveling = false
   const devtools = extension.connect({ name, ...rest })
-  const unsub1 = subscribe(proxyObject, (unstable_ops) => {
+  const unsub1 = subscribeCoalesced(proxyObject, (unstable_ops) => {
     const action = unstable_ops
       .filter(([_, path]) => path[0] !== DEVTOOLS)
       .map(([op, path]) => `${op}:${path.map(String).join('.')}`)

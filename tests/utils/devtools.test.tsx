@@ -58,6 +58,22 @@ describe('devtools', () => {
     expect(extension.init).toHaveBeenLastCalledWith({ count: 0 })
   })
 
+  it('sends one message for a burst of writes', async () => {
+    const obj = proxy({ count: 0, text: 'a' })
+    devtools(obj, { enabled: true })
+
+    obj.count = 1
+    obj.text = 'b'
+    expect(extension.send).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(extension.send).toHaveBeenCalledTimes(1)
+    expect(extension.send).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'set:count, set:text' }),
+      { count: 1, text: 'b' },
+    )
+  })
+
   describe('If there is no extension installed...', () => {
     let savedConsoleWarn: any
     beforeEach(() => {

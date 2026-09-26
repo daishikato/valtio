@@ -171,6 +171,53 @@ const snapCache: WeakMap<object, [version: number, snap: unknown]> =
 const versionHolder = [1] as [number]
 const proxyCache: WeakMap<object, ProxyObject> = new WeakMap()
 
+// notification delivery
+type Subscription = {
+  callback: (unstable_ops: Op[]) => void
+  active: boolean
+}
+let batchDepth = 0
+let isDelivering = false
+let pendingSubscriptions = new Map<Subscription, Op[]>()
+
+const deliver = (): unknown[] => {
+  const errors: unknown[] = []
+  isDelivering = true
+  try {
+    // Writes made by callbacks are queued for the next round,
+    // so every subscription receives its ops in write order.
+    while (pendingSubscriptions.size) {
+      const round = pendingSubscriptions
+      pendingSubscriptions = new Map()
+      round.forEach((ops, subscription) => {
+        if (subscription.active) {
+          try {
+            subscription.callback(ops)
+          } catch (error) {
+            errors.push(error)
+          }
+        }
+      })
+    }
+  } finally {
+    isDelivering = false
+  }
+  return errors
+}
+
+const noErrors: readonly unknown[] = []
+
+const deliverIfOutermost = (): readonly unknown[] =>
+  batchDepth || isDelivering || !pendingSubscriptions.size
+    ? noErrors
+    : deliver()
+
+const throwIfErrors = (errors: readonly unknown[]) => {
+  if (errors.length) {
+    throw new AggregateError(errors, 'subscribe callback failed')
+  }
+}
+
 // internal functions
 let objectIs: (a: unknown, b: unknown) => boolean = Object.is
 let newProxy = <T extends object>(target: T, handler: ProxyHandler<T>): T =>
@@ -199,7 +246,15 @@ export function proxy<T extends object>(baseObject: T = {} as T): T {
   ) => {
     if (version !== nextVersion) {
       checkVersion = version = nextVersion
-      listeners.forEach((listener) => listener(op, nextVersion))
+      // Every write is delivered like a batch of one, so that all
+      // subscriptions notified by it are queued before any callback runs.
+      ++batchDepth
+      try {
+        listeners.forEach((listener) => listener(op, nextVersion))
+      } finally {
+        --batchDepth
+      }
+      throwIfErrors(deliverIfOutermost())
     }
   }
   let checkVersion = version
@@ -309,43 +364,67 @@ export function getVersion(proxyObject: unknown): number | undefined {
 
 /**
  * Subscribes to changes in a proxy object
+ *
+ * The callback runs synchronously after each write, before the write
+ * returns. Use `batch` to group several writes into one notification.
  */
 export function subscribe<T extends object>(
   proxyObject: T,
   callback: (unstable_ops: Op[]) => void,
-  notifyInSync?: boolean,
 ): () => void {
+  // eslint-disable-next-line prefer-rest-params
+  if (typeof arguments[2] === 'boolean') {
+    throw new Error(
+      'notifyInSync has been removed. subscribe() is synchronous. Use batch() to group notifications.',
+    )
+  }
   const proxyState = proxyStateMap.get(proxyObject as object)
   if (process.env.NODE_ENV !== 'production' && !proxyState) {
     console.warn('Please use proxy object')
   }
-  let promise: Promise<void> | undefined
-  const ops: Op[] = []
   const addListener = (proxyState as ProxyState)[2]
-  let isListenerActive = false
+  const subscription: Subscription = { callback, active: false }
   const listener: Listener = (op) => {
+    let ops = pendingSubscriptions.get(subscription)
+    if (!ops) {
+      ops = []
+      pendingSubscriptions.set(subscription, ops)
+    }
     if (op) {
       ops.push(op)
     }
-    if (notifyInSync) {
-      callback(ops.splice(0))
-      return
-    }
-    if (!promise) {
-      promise = Promise.resolve().then(() => {
-        promise = undefined
-        if (isListenerActive) {
-          callback(ops.splice(0))
-        }
-      })
-    }
   }
   const removeListener = addListener(listener)
-  isListenerActive = true
+  subscription.active = true
   return () => {
-    isListenerActive = false
+    subscription.active = false
     removeListener()
   }
+}
+
+/**
+ * Groups writes so that subscribers are notified once
+ *
+ * Callbacks are deferred until the outermost `batch` returns. Each
+ * subscription then runs once with the ops of all its writes, in order.
+ * Writes are visible to reads and `snapshot` immediately.
+ */
+export function batch<T>(fn: () => T): T {
+  ++batchDepth
+  let result: T
+  try {
+    result = fn()
+  } catch (error) {
+    --batchDepth
+    const errors = deliverIfOutermost()
+    if (errors.length) {
+      throw new AggregateError([error, ...errors], 'batch failed')
+    }
+    throw error
+  }
+  --batchDepth
+  throwIfErrors(deliverIfOutermost())
+  return result
 }
 
 /**
