@@ -65,7 +65,7 @@ These are the decisions the design needs from you. Each one states the proposed 
 - Notifications are sync-only. In PR a, `useSnapshot` pays for a snapshot on every unbatched write, which is accepted with a `TODO` until d5 removes it.
 - PR c re-exports `getUntracked` and `trackMemo`; the d PRs replace them.
 - PR b removes `getVersion`.
-- `batch(fn)` returns `fn`'s result, subscriber errors are thrown as an `AggregateError` after delivery finishes, and `subscribeInAsync` is not added.
+- `batch(fn)` returns `fn`'s result, and subscriber errors are thrown from it as an `AggregateError` after delivery finishes. Outside `batch()`, they are rethrown in a microtask, so a write never throws because of a subscriber. `subscribeInAsync` is not added.
 - `snapshot()` keeps its semantics. React renders only immutable snapshots, which is what makes Valtio safe under concurrent rendering.
 - Ops and `unstable_enableOp` are removed, with a replacement that keeps valtio-yjs and valtio-y working ([Dropping ops](#dropping-ops)).
 

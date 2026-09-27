@@ -1,12 +1,14 @@
 # v3 PR a: Sync-only Notifications and `batch()`
 
-**Status: design note, not implemented.** This is the first PR of the split described in [v3-o1-subscription.md](./v3-o1-subscription.md#delivery-plan). It targets `v3`.
+**Status: implemented in #4.** This is the first PR of the split described in [v3-o1-subscription.md](./v3-o1-subscription.md#delivery-plan). It targets `v3`.
 
 **Decided so far:**
 
 - Notifications become synchronous, and the `notifyInSync` and `sync` options go away.
 - `batch()` lands in vanilla and returns `fn`'s result.
-- When subscriber callbacks throw, the delivery still finishes, and then an `AggregateError` is thrown.
+- When subscriber callbacks throw, the delivery still finishes. Inside `batch()`, one `AggregateError` is then thrown from `batch`. Outside `batch()`, each error is rethrown in a microtask, so a write never throws because of a subscriber.
+- Writes made by callbacks are delivered together in the next round.
+- Native array methods keep notifying once per internal write; `batch()` is the way to get one notification.
 - `subscribeInAsync` is not added ([why](#not-added-subscribeinasync)).
 - In this PR, `useSnapshot` pays for a snapshot on every write that isn't batched. That cost is accepted until d5 removes it, with a `TODO` in the code and no workaround.
 
@@ -33,13 +35,16 @@ All notifications, batched or not, go through one delivery loop.
 
 - **Rounds.** A round runs every pending subscription once, in the order each was first notified.
 - **Writes made by callbacks** are queued for the next round, not delivered inside the current one. Every subscriber therefore sees writes in order, and a subscriber that hasn't received its batched ops yet can't see a later write first.
+- **They are delivered together,** as if batched: all writes made during one round form the next round. A round per write would only replay the same state, because every one of those writes has already happened when the next round runs.
 - **One loop at a time.** A `batch()` called from a callback joins the running loop instead of starting another. That `batch()` therefore returns before its listeners run. They run in the next round, still before the outermost write or `batch` returns.
 - **Timing.** The loop ends when a round leaves nothing pending, still before the outermost write or `batch` returns.
 
 **Errors**
 
 - **Callback errors are collected.** The loop always finishes, so one failing subscriber doesn't silence the others.
-- **After the loop,** if any callback threw, an `AggregateError` with every callback error is thrown. For an unbatched write, the assignment throws it after the write has taken effect.
+- **After the loop, inside `batch()`:** if any callback threw, `batch` throws an `AggregateError` with every callback error, after `fn` has completed.
+- **After the loop, outside `batch()`:** each callback error is rethrown in a microtask (`queueMicrotask(() => { throw error })`). The write itself never throws because of a subscriber. Throwing from the proxy's `set` trap would abort multi-step writes halfway: `splice`, `sort` or `unshift` would leave the array corrupted. There is no hook to replace the reporter for now.
+- **Whatever started the delivery decides.** Errors from callbacks that run for writes made inside callbacks follow the outermost write or `batch`.
 - **Errors from `fn`:**
   - If only `fn` threw, `batch` rethrows that error unchanged, after delivering the notifications for the writes it made.
   - If `fn` and callbacks both threw, the `AggregateError` lists `fn`'s error first.
@@ -56,7 +61,7 @@ The pieces:
 
 - **Listener:** records its subscription in `pending`, and appends the op only when ops are enabled. With ops off, the callback receives `[]`, never `[undefined]`.
 - **Write:** each write is delivered like a batch of one. The proxy's notify step raises `depth` while it runs its listeners, so every subscription the write notifies is queued first. It then runs the loop only when `depth` is back to 0, no loop is running, and something is pending. A write made by a callback therefore never starts a loop of its own; it is queued for the next round.
-- **Loop:** swaps `pending` for a fresh map, runs each still-active subscription with its ops while collecting errors, and repeats until the fresh map stays empty. Then it throws as described above.
+- **Loop:** swaps `pending` for a fresh map, runs each still-active subscription with its ops while collecting errors, and repeats until the fresh map stays empty. The caller then throws (`batch`) or rethrows in microtasks (a write), as described above.
 - **`batch`:** increments `depth`, runs `fn`, and decrements in `finally`. It runs the loop only when `depth` is back to 0 and no loop is running.
 
 ### `valtio/utils`
@@ -73,16 +78,16 @@ The pieces:
 
 ## Migration
 
-| Change                                                                                   | Detection                           | Remedy                                                                  |
-| ---------------------------------------------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------- |
-| `subscribe` callbacks run synchronously on every write, instead of once per microtask    | Docs                                | `batch()` around multi-write code, or coalesce in the callback (recipe) |
-| A subscriber callback that throws now throws from the write, wrapped in `AggregateError` | The thrown error                    | Handle errors inside the callback                                       |
-| `subscribe(p, cb, true)` or `subscribe(p, cb, false)`                                    | TypeScript error; runtime error (1) | Drop the argument                                                       |
-| `subscribeKey(p, key, cb, true)`                                                         | TypeScript error; runtime error (1) | Drop the argument                                                       |
-| `useSnapshot(p, { sync })`, `useProxy(p, { sync })`                                      | TypeScript error; runtime error (2) | Drop the argument; updates are always synchronous                       |
-| A loop of writes without `batch()` makes `useSnapshot` take one snapshot per write       | Silent, slower                      | `batch()`; d5 removes the cost                                          |
-| `splice`, `sort` and other native array methods notify once per internal write           | Silent                              | `batch()`                                                               |
-| The "controlled inputs may lose caret position" gotcha                                   | Goes away                           | —                                                                       |
+| Change                                                                                                                     | Detection                           | Remedy                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------- |
+| `subscribe` callbacks run synchronously on every write, instead of once per microtask                                      | Docs                                | `batch()` around multi-write code, or coalesce in the callback (recipe) |
+| A subscriber callback error is rethrown in a microtask, or thrown from `batch` as an `AggregateError`                      | Uncaught error, or the thrown error | Handle errors inside the callback                                       |
+| `subscribe(p, cb, true)` or `subscribe(p, cb, false)`                                                                      | TypeScript error; runtime error (1) | Drop the argument                                                       |
+| `subscribeKey(p, key, cb, true)`                                                                                           | TypeScript error; runtime error (1) | Drop the argument                                                       |
+| `useSnapshot(p, { sync })`, `useProxy(p, { sync })`                                                                        | TypeScript error; runtime error (2) | Drop the argument; updates are always synchronous                       |
+| A loop of writes without `batch()` makes `useSnapshot` take one snapshot per write                                         | Silent, slower                      | `batch()`; d5 removes the cost                                          |
+| `splice`, `sort` and other native array methods notify once per internal write, so subscribers can see intermediate arrays | Silent                              | `batch()`                                                               |
+| The "controlled inputs may lose caret position" gotcha                                                                     | Goes away                           | —                                                                       |
 
 The first row is the main silent semantic change, and it affects every `subscribe` user. It is the change #1177 asked for, so it gets its own section in the migration guide. The `subscribe` page gives this recipe for code that wants the old coalesced delivery:
 
@@ -148,8 +153,12 @@ Measured on `v3` at `fb594a1` with vitest, jsdom and a React 19.2.5 dev build, u
 - Delivery order:
   - A callback that writes doesn't let a later write reach another subscriber before its batched ops.
   - A `batch` inside a callback joins the running loop. It returns before its listeners run, and they run before the outermost write or `batch` returns.
+- Writes made by a callback reach other subscribers together, in one callback.
 - Errors:
-  - Several throwing callbacks produce one `AggregateError`, and the remaining subscribers still run.
+  - Outside `batch()`, the write doesn't throw, the remaining subscribers still run, and each error is rethrown in a microtask.
+  - A throwing subscriber doesn't interrupt `splice`.
+  - Inside `batch()`, several throwing callbacks produce one `AggregateError`, and the remaining subscribers still run.
+  - A throwing `fn` in a `batch()` called from a callback follows the outermost write or `batch`.
   - A throwing `fn` alone is rethrown unchanged.
   - When `fn` and a callback both throw, one `AggregateError` lists `fn`'s error first, and the other subscribers still ran.
 - With ops disabled, callbacks receive `[]`.
@@ -172,3 +181,26 @@ Decided: `subscribeInAsync` is not added.
 - **Its only in-repo user is `devtools`,** which coalesces with a private helper.
 - **Application code has other remedies.** It can wrap multi-write code in `batch()`, or coalesce inside its callback with the recipe above.
 - **It can be added later without breaking anything,** but it could not be removed later without breaking users.
+
+## Prior art
+
+How other reactive libraries handle the same questions, checked against their published source:
+
+| Library             | Callbacks run                                          | Does a callback error reach the writer?                                                         | Writes made inside a callback | Array method as one change                                                                |
+| ------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------- | ----------------------------- | ----------------------------------------------------------------------------------------- |
+| TC39 Signals (spec) | `notify` inside `set`; effects left to frameworks      | Yes, after all `notify` callbacks, as an AggregateError                                         | Forbidden in `notify`         | Left to libraries                                                                         |
+| signal-polyfill 0.2 | `notify` inside `set`                                  | Yes, the first error; the rest are skipped                                                      | Forbidden                     | —                                                                                         |
+| alien-signals 3     | Inside `set`                                           | Yes, the first error; the rest wait for the next write                                          | Nested                        | —                                                                                         |
+| Angular 22          | Effects deferred                                       | No, sent to `ErrorHandler`                                                                      | Allowed                       | —                                                                                         |
+| Preact signals 1.14 | Inside `set`, or at the end of `batch`                 | Yes, the first error; the others are dropped                                                    | Queued in rounds, together    | —                                                                                         |
+| Solid 1.9           | Inside `set`, or at the end of `batch`                 | Yes without a handler; no with `onError`/`catchError`                                           | Queued round, together        | `createMutable`: `get` trap wrapping methods in `batch`                                   |
+| Solid 2.0 rc        | Microtask; `flush()` forces it                         | Only through `flush()`; otherwise uncaught                                                      | Next pass, together           | Copy-on-write drafts                                                                      |
+| Svelte 5.57         | Microtask; `flushSync` forces it                       | Only through `flushSync`; otherwise uncaught or a boundary                                      | Next batch, together          | Through the microtask                                                                     |
+| MobX 7 reactions    | Inside the write, or at the end of an action           | No by default: `onError`, `console.error`, `onReactionError`; opt-in rethrow "will NOT recover" | Queued in rounds, together    | Own `splice`; `fill`/`copyWithin` per index                                               |
+| Vue 3.5             | `effect` at the end of a batch; `watch` in a microtask | `effect`: yes, the first error; `watch`: `errorHandler`                                         | Nested                        | `get` trap for `push`/`pop`/`shift`/`unshift`/`splice`; `sort`/`reverse`/`fill` per index |
+| Jotai 3             | At the end of `store.set`                              | Yes, one AggregateError after the commit                                                        | Nested                        | —                                                                                         |
+| Zustand 5           | Inside `setState`                                      | Yes, the first error; the rest are skipped                                                      | Nested                        | —                                                                                         |
+
+- **Writes inside callbacks.** No library replays one round per write. They are either nested (Vue, Jotai, Zustand, alien-signals) or queued and delivered together (Preact, MobX, Solid, Svelte). valtio follows the second, like Preact and MobX.
+- **Errors.** Libraries that run callbacks inside the write usually throw to the writer, but only the TC39 spec, Preact, Vue's `effect` and Jotai still run the other callbacks. MobX, the closest to valtio (mutable state, synchronous reactions, actions, arrays), keeps reaction errors away from the writer by default. Svelte 5 and Solid 2 return them only to a caller that forces a synchronous flush, which is the shape of "errors come back only from `batch()`".
+- **Arrays.** A synchronous library makes a native array method one change only through its own method implementations (MobX) or a `get` trap (Vue, Solid's `createMutable`). valtio uses neither, so `batch()` is the way.
