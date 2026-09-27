@@ -37,7 +37,7 @@ state.arr.push('world')
 
 ## Notifications are synchronous
 
-The callback runs synchronously after each change, before the assignment returns. Several changes notify several times, unless they are wrapped in [`batch`](./batch):
+The callback runs synchronously after each change, before the assignment returns. Several changes notify several times, unless they are wrapped in [`batch`](./batch) or made inside a callback (see below):
 
 ```js
 import { batch, proxy, subscribe } from 'valtio'
@@ -54,9 +54,13 @@ batch(() => {
 }) // logs 'changed' once
 ```
 
-Each subscriber receives changes in the order they were made. A change made inside a callback is delivered after every subscriber has received the current change.
+Each subscriber receives changes in the order they were made.
 
-If callbacks throw, the other subscribers still run, and the errors are then thrown together as an `AggregateError` from the assignment (or from `batch`).
+A change made inside a callback is delivered after every subscriber has received the current change. The changes made during the same round of callbacks are delivered together, as if they were batched. Such an assignment returns before its own subscribers run.
+
+Native array methods such as `splice` and `sort` make several changes, and notify once per change, so a subscriber can see the array in between. Wrap them in `batch` to notify once, with the final array.
+
+If a callback throws, the other subscribers still run. The error is then rethrown in a microtask, so an assignment never throws because of a subscriber. Inside `batch`, the errors are instead thrown together from `batch` as an `AggregateError`, after `fn` has completed.
 
 If you prefer to be notified once per microtask, as in Valtio v2, coalesce inside your callback:
 

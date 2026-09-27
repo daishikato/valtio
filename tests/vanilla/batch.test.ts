@@ -97,6 +97,25 @@ describe('delivery order', () => {
     },
   )
 
+  it('should deliver the writes made by a callback together in the next round', () => {
+    unstable_enableOp(true)
+    const state = proxy({ a: 0, b: 0, c: 0 })
+    subscribe(state, () => {
+      if (state.b === 0) {
+        state.b = 1
+        state.c = 1
+      }
+    })
+    const seen: unknown[] = []
+    subscribe(state, (ops) => {
+      seen.push(ops.map(([, path]) => path[0]))
+    })
+
+    state.a = 1
+
+    expect(seen).toEqual([['a'], ['b', 'c']])
+  })
+
   it('should return from a batch called in a callback before its listeners run', () => {
     unstable_enableOp(true)
     const state = proxy({ a: 0, b: 0 })
@@ -145,8 +164,70 @@ describe('delivery order', () => {
   })
 })
 
+// Runs write and returns the errors it rethrew in microtasks,
+// instead of letting them escape as uncaught errors.
+const reportedErrors = (write: () => void) => {
+  const callbacks: (() => void)[] = []
+  const spy = vi
+    .spyOn(globalThis, 'queueMicrotask')
+    .mockImplementation((callback) => {
+      callbacks.push(callback)
+    })
+  try {
+    write()
+  } finally {
+    spy.mockRestore()
+  }
+  return callbacks.map((callback) => {
+    try {
+      callback()
+    } catch (error) {
+      return error
+    }
+    return undefined
+  })
+}
+
 describe('errors', () => {
-  it('should run the other subscribers and throw an AggregateError', () => {
+  it('should run the other subscribers and rethrow each error in a microtask without batch', () => {
+    const state = proxy({ count: 0 })
+    const error1 = new Error('first')
+    const error2 = new Error('second')
+    const handler = vi.fn()
+    subscribe(state, () => {
+      throw error1
+    })
+    subscribe(state, handler)
+    subscribe(state, () => {
+      throw error2
+    })
+
+    const errors = reportedErrors(() => {
+      state.count = 1
+    })
+
+    expect(state.count).toBe(1)
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(errors).toEqual([error1, error2])
+  })
+
+  it('should complete a native array method when a subscriber throws', () => {
+    const state = proxy([0, 1, 2, 3])
+    const error = new Error('boom')
+    subscribe(state, () => {
+      throw error
+    })
+
+    const errors = reportedErrors(() => {
+      state.splice(1, 2)
+    })
+
+    expect(state).toEqual([0, 3])
+    expect(errors.length).toBeGreaterThan(0)
+    expect(errors.every((e) => e === error)).toBe(true)
+  })
+
+  it('should run the other subscribers and throw an AggregateError from batch', () => {
     const state = proxy({ count: 0 })
     const error1 = new Error('first')
     const error2 = new Error('second')
@@ -161,7 +242,9 @@ describe('errors', () => {
 
     let thrown: unknown
     try {
-      state.count = 1
+      batch(() => {
+        state.count = 1
+      })
     } catch (e) {
       thrown = e
     }
@@ -214,7 +297,7 @@ describe('errors', () => {
 })
 
 describe('errors from a batch inside a callback', () => {
-  it('should deliver its writes and report its error with the other callback errors', () => {
+  const setup = () => {
     const state = proxy({ a: 0, b: 0 })
     const fnError = new Error('fn')
     const bHandler = vi.fn()
@@ -227,10 +310,29 @@ describe('errors from a batch inside a callback', () => {
       }
     })
     subscribe(state, bHandler)
+    return { state, fnError, bHandler }
+  }
+
+  it('should deliver its writes and rethrow its error in a microtask when the outer write is not batched', () => {
+    const { state, fnError, bHandler } = setup()
+
+    const errors = reportedErrors(() => {
+      state.a = 1
+    })
+
+    expect(state.b).toBe(1)
+    expect(bHandler).toHaveBeenCalledTimes(2)
+    expect(errors).toEqual([fnError])
+  })
+
+  it('should deliver its writes and throw its error from the outer batch', () => {
+    const { state, fnError, bHandler } = setup()
 
     let thrown: unknown
     try {
-      state.a = 1
+      batch(() => {
+        state.a = 1
+      })
     } catch (e) {
       thrown = e
     }

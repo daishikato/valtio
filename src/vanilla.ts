@@ -184,8 +184,8 @@ const deliver = (): unknown[] => {
   const errors: unknown[] = []
   isDelivering = true
   try {
-    // Writes made by callbacks are queued for the next round,
-    // so every subscription receives its ops in write order.
+    // Writes made by callbacks are queued for the next round, and delivered
+    // together, so every subscription receives its ops in write order.
     while (pendingSubscriptions.size) {
       const round = pendingSubscriptions
       pendingSubscriptions = new Map()
@@ -216,6 +216,16 @@ const throwIfErrors = (errors: readonly unknown[]) => {
   if (errors.length) {
     throw new AggregateError(errors, 'subscribe callback failed')
   }
+}
+
+// A write outside batch() never throws because of a subscriber,
+// so that multi-step writes such as array methods always complete.
+const reportErrors = (errors: readonly unknown[]) => {
+  errors.forEach((error) =>
+    queueMicrotask(() => {
+      throw error
+    }),
+  )
 }
 
 // internal functions
@@ -254,7 +264,7 @@ export function proxy<T extends object>(baseObject: T = {} as T): T {
       } finally {
         --batchDepth
       }
-      throwIfErrors(deliverIfOutermost())
+      reportErrors(deliverIfOutermost())
     }
   }
   let checkVersion = version
@@ -367,6 +377,8 @@ export function getVersion(proxyObject: unknown): number | undefined {
  *
  * The callback runs synchronously after each write, before the write
  * returns. Use `batch` to group several writes into one notification.
+ * An error thrown by the callback is rethrown in a microtask, unless the
+ * write is inside `batch`, which throws it.
  */
 export function subscribe<T extends object>(
   proxyObject: T,
@@ -408,6 +420,7 @@ export function subscribe<T extends object>(
  * Callbacks are deferred until the outermost `batch` returns. Each
  * subscription then runs once with the ops of all its writes, in order.
  * Writes are visible to reads and `snapshot` immediately.
+ * Errors thrown by callbacks are thrown from `batch` as an `AggregateError`.
  */
 export function batch<T>(fn: () => T): T {
   ++batchDepth
