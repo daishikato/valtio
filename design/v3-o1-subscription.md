@@ -203,6 +203,8 @@ subscribe(p, callback, { ownKeys: true }) // an own key of p added or removed
 - A same-value `set`, or a `delete` of an absent key, notifies nobody.
 - Replacing `state.child` notifies `state`'s `child` key and its subtree listeners. The old child's own listeners stay silent, because it was detached rather than mutated.
 - `subscribeKey(p, key, cb)` in utils becomes a key subscription plus its existing `Object.is` value filter, so existing callers see no change. A nested write under `p[key]` still doesn't call it, now because the key listener doesn't fire rather than because of the filter. That makes it O(1), the goal of #1161. React does not use it: the filter hides an `undefined` key appearing or disappearing.
+  - It also fixes an ordering issue PR a leaves with a `TODO`. Today `subscribeKey` runs on every notification of `p` and reads the live value, so a write to `key` made by an earlier callback in the current round is reported before later subscribers receive the current change. As a key subscription, it runs only in the round that delivers the write to `key`.
+  - Two limits stay, because it still compares the live value: a value changed and changed back within one round is not reported, as inside `batch()`; and a later write to `key` already made in that round is reported in place of the earlier one.
 
 ### `isProxyObject` and `unstable_isRef`
 
@@ -541,6 +543,7 @@ Each item becomes a test in the PR it covers.
   - `keys: false` and a string throw.
   - Array writes report indices and `'length'`.
   - A set to `undefined` stays `in p`.
+- **`subscribeKey` order (d2)**: a callback for `a` writes `b`; `subscribeKey(state, 'b', …)` runs after every subscriber has received `a`, in the round that delivers `b`.
 - **Binding sketch (d2)**: a minimal Y.Map / Y.Array binding built on `{ keys: true }` round-trips `push`, `unshift` of a value equal to the tail, `sort`, and two splices in one `batch`, and keeps Y item identity for moved containers.
 - **Tearing (d5)**: run the tearing checks from will-this-react-global-state-work-in-concurrent-rendering, since the suite covers concurrent rendering only partly.
 - **Burst of writes (d5)**: the loop from the [appendix](#appendix-evidence-and-references) takes no per-write snapshot.
