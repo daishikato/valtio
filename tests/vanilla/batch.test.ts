@@ -354,7 +354,7 @@ describe('coalescing recipe from the subscribe docs', () => {
     let scheduled = false
     let active = true
     const unsubscribe = subscribe(proxyObject, (newOps) => {
-      ops.push(...newOps)
+      newOps.forEach((op) => ops.push(op))
       if (!scheduled) {
         scheduled = true
         queueMicrotask(() => {

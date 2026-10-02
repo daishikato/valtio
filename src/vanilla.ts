@@ -377,6 +377,9 @@ export function getVersion(proxyObject: unknown): number | undefined {
  *
  * The callback runs synchronously after each write, before the write
  * returns. Use `batch` to group several writes into one notification.
+ * A write made inside a callback is the exception: it returns first, and
+ * is delivered after the current callbacks, together with the other writes
+ * made during them.
  * An error thrown by the callback is rethrown in a microtask, unless the
  * write is inside `batch`, which throws it.
  */

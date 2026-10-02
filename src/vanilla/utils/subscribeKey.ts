@@ -23,6 +23,10 @@ export function subscribeKey<T extends object, K extends keyof T>(
     )
   }
   let prevValue = proxyObject[key]
+  // TODO: Build this on a key-level subscription when subscriptions become
+  // key-level. It reads the live value on every notification of proxyObject,
+  // so a write to key made by an earlier callback in the current round is
+  // reported before the other subscribers receive the current change.
   return subscribe(proxyObject, () => {
     const nextValue = proxyObject[key]
     if (!Object.is(prevValue, nextValue)) {

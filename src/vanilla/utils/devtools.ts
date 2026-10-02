@@ -32,7 +32,8 @@ const subscribeCoalesced = (
   let scheduled = false
   let active = true
   const unsubscribe = subscribe(proxyObject, (newOps) => {
-    ops.push(...newOps)
+    // Not ops.push(...newOps): a large batch exceeds the argument limit.
+    newOps.forEach((op) => ops.push(op))
     if (!scheduled) {
       scheduled = true
       Promise.resolve().then(() => {
