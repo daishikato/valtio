@@ -1,7 +1,7 @@
 import { StrictMode, Suspense } from 'react'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { proxy, useSnapshot } from 'valtio'
+import { batch, proxy, useSnapshot } from 'valtio'
 import { devtools } from 'valtio/utils'
 
 describe('devtools', () => {
@@ -56,6 +56,39 @@ describe('devtools', () => {
     )
 
     expect(extension.init).toHaveBeenLastCalledWith({ count: 0 })
+  })
+
+  it('sends one message for a burst of writes', async () => {
+    const obj = proxy({ count: 0, text: 'a' })
+    devtools(obj, { enabled: true })
+
+    obj.count = 1
+    obj.text = 'b'
+    expect(extension.send).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(extension.send).toHaveBeenCalledTimes(1)
+    expect(extension.send).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'set:count, set:text' }),
+      { count: 1, text: 'b' },
+    )
+  })
+
+  it('sends one message for a batch larger than the argument limit', async () => {
+    const obj = proxy<Record<string, number>>({})
+    devtools(obj, { enabled: true })
+    const count = 200_000
+
+    batch(() => {
+      for (let i = 0; i < count; i++) {
+        obj['k' + i] = i
+      }
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(extension.send).toHaveBeenCalledTimes(1)
+    const [action] = extension.send.mock.lastCall as [{ type: string }]
+    expect(action.type.split(', ')).toHaveLength(count)
   })
 
   describe('If there is no extension installed...', () => {
