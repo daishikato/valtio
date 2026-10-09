@@ -303,6 +303,7 @@ The proposal follows the `versioned-index` branch: the index lives in state, as 
 
 - `has(k)` and a missing-key `get(k)` read that key's lookup entry. A present-key `get(k)` also reads `data[i]`.
 - A value-only `set` writes only `data[i]`, so `has` readers and the list parent stay quiet.
+- A call that changes nothing doesn't notify. On `v3` and after PR a, a `set` of an equal value and a `clear` of an empty collection still bump `epoch` and notify; PR a marks both with a `TODO`, and d4 removes them.
 - `size` reads a size entry. Iteration walks the slot entries (`slot → ref({ key })`), which keep Map insertion order across a delete and a re-add.
 - Object keys map to per-object symbols on the lookup. These are enumerable, so the tracker records them like any user key.
 - `lookup`, `data` and `index` are non-enumerable, so they don't appear in `Object.keys` or a spread of the collection.
@@ -538,7 +539,7 @@ Each item becomes a test in the PR it covers.
   - The identity skip works.
   - Accessors are skipped.
   - A collection snapshot throws.
-- **Collections**: `get`, `has` and `size` agree through a wrapper after later writes, and a value-only `set` leaves `has` readers quiet.
+- **Collections**: `get`, `has` and `size` agree through a wrapper after later writes, and a value-only `set` leaves `has` readers quiet. A `set` of an equal value and a `clear` of an empty collection don't notify.
 - **Key subscriptions (d2):**
   - A list fires only when a listed key is set or deleted directly, never for a nested write, and calls back with no arguments.
   - Array writes fire for the index and for `'length'` when they change.
