@@ -100,7 +100,7 @@ const subscribeCoalesced = (p, callback) => {
   let scheduled = false
   let active = true
   const unsubscribe = subscribe(p, (newOps) => {
-    ops.push(...newOps)
+    newOps.forEach((op) => ops.push(op))
     if (!scheduled) {
       scheduled = true
       queueMicrotask(() => {
