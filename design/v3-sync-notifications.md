@@ -1,6 +1,6 @@
 # v3 PR a: Sync-only Notifications and `batch()`
 
-**Status: implemented in #4.** This is the first PR of the split described in [v3-o1-subscription.md](./v3-o1-subscription.md#delivery-plan). It targets `v3`.
+**Status: merged into `v3` as pmndrs/valtio#1256.** This is the first PR of the split described in [v3-o1-subscription.md](./v3-o1-subscription.md#delivery-plan). It targets `v3`.
 
 **Decided so far:**
 
