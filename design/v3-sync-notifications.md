@@ -6,7 +6,7 @@
 
 - Notifications become synchronous, and the `notifyInSync` and `sync` options go away.
 - `batch()` lands in vanilla and returns `fn`'s result.
-- When subscriber callbacks throw, the delivery still finishes. Inside `batch()`, one `AggregateError` is then thrown from `batch`. Outside `batch()`, each error is rethrown in a microtask, so a write never throws because of a subscriber.
+- When subscriber callbacks throw, the delivery still finishes. Inside `batch()`, one `AggregateError` is then thrown from `batch`. Outside `batch()`, each error is rethrown in a microtask, so a write never throws because of a subscriber. Only the caller's own `batch()` throws: a batch that a utility such as `proxyMap` runs internally reports errors like a write.
 - Writes made by callbacks are delivered together in the next round.
 - Native array methods keep notifying once per internal write; `batch()` is the way to get one notification.
 - `subscribeInAsync` is not added ([why](#not-added-subscribeinasync)).
@@ -19,6 +19,7 @@
 **`subscribe(p, callback)`**
 
 - The callback runs synchronously, before the write that triggered it returns. It receives `[op]`, or `[]` when ops are not enabled with `unstable_enableOp`.
+- It is called as a plain function, as on `v3`, so `this` is never the internal subscription object.
 - The third parameter is removed from the types. Passing a boolean throws (message 1 below). `false` throws too, because the asynchronous delivery it selected no longer exists. `subscribe(p, cb, undefined)` stays valid.
 
 **`batch(fn)` (new)**
@@ -45,6 +46,7 @@ All notifications, batched or not, go through one delivery loop.
 - **After the loop, inside `batch()`:** if any callback threw, `batch` throws an `AggregateError` with every callback error, after `fn` has completed.
 - **After the loop, outside `batch()`:** each callback error is rethrown in a microtask (`queueMicrotask(() => { throw error })`). The write itself never throws because of a subscriber. Throwing from the proxy's `set` trap would abort multi-step writes halfway: `splice`, `sort` or `unshift` would leave the array corrupted. There is no hook to replace the reporter for now.
 - **Whatever started the delivery decides.** Errors from callbacks that run for writes made inside callbacks follow the outermost write or `batch`.
+- **A utility's batch counts as a write.** `proxyMap`, `proxySet` and `devtools` group their writes with `batchAsWrite`, a variant of `batch` that rethrows callback errors in microtasks. So `map.set()` never throws because of a subscriber, and only a `batch()` the caller wrote throws an `AggregateError`. Inside the caller's `batch()` or a callback, `batchAsWrite` joins the outer one like any nested `batch`. It is not exported; utils get it from `unstable_getInternalStates()`.
 - **Errors from `fn`:**
   - If only `fn` threw, `batch` rethrows that error unchanged, after delivering the notifications for the writes it made.
   - If `fn` and callbacks both threw, the `AggregateError` lists `fn`'s error first.
@@ -68,7 +70,8 @@ The pieces:
 
 - **`subscribeKey(p, key, callback)`** is synchronous. Passing a boolean fourth argument throws.
 - **`devtools`** coalesces a burst of writes into one Redux DevTools message with a private microtask helper, so its output doesn't change. It keeps calling `unstable_enableOp()`, which its action names depend on.
-- **`proxyMap` and `proxySet`** wrap `set`, `add`, `delete` and `clear` in `batch()`. Each of these writes `data`, `index` and `epoch` separately. Without `batch`, a listener would run up to three times and see an index and data that don't match yet. A call that writes nothing, such as `add` of a value already present or `delete` of a missing key, doesn't notify.
+- **`devtools`** applies each incoming state in one `batchAsWrite`: an `ACTION` payload, a `JUMP_TO_ACTION` or `JUMP_TO_STATE` state with its marker, and all the states of an `IMPORT_STATE`. Its `Object.assign` writes one key at a time, so a subscriber would otherwise see a partly applied state, and an import would notify once per key of every past state. In v2, asynchronous delivery hid both. Subscriber errors are rethrown in microtasks, so they never reach the `ACTION` handler's "please dispatch a serializable value" message.
+- **`proxyMap` and `proxySet`** wrap `set`, `add`, `delete` and `clear` in `batchAsWrite`, so a method notifies once and never throws because of a subscriber. Each of these writes `data`, `index` and `epoch` separately. Without `batch`, a listener would run up to three times and see an index and data that don't match yet. A call that writes nothing, such as `add` of a value already present or `delete` of a missing key, doesn't notify.
 
 ### `valtio/react`
 
@@ -161,11 +164,15 @@ Measured on `v3` at `fb594a1` with vitest, jsdom and a React 19.2.5 dev build, u
   - A throwing `fn` in a `batch()` called from a callback follows the outermost write or `batch`.
   - A throwing `fn` alone is rethrown unchanged.
   - When `fn` and a callback both throw, one `AggregateError` lists `fn`'s error first, and the other subscribers still ran.
+  - A `proxyMap` or `proxySet` method doesn't throw because of a subscriber; inside the caller's `batch()`, the `AggregateError` is thrown from it.
+  - A subscriber error during a `devtools` `ACTION` isn't reported as a payload error.
+- A callback is called without a receiver.
 - With ops disabled, callbacks receive `[]`.
 - `subscribe(p, cb, undefined)`, `useSnapshot(p, undefined)` and `useProxy(p)` don't throw.
 - Every removed argument throws its message.
 - Each `proxyMap` and `proxySet` method that writes notifies once, after `data`, `index` and `epoch` all match. A call that writes nothing doesn't notify.
 - `devtools` still sends one message per burst.
+- `devtools` applies an `ACTION`, a jump and an `IMPORT_STATE` in one notification each, with the whole state applied.
 
 ## Docs
 
