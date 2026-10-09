@@ -170,7 +170,7 @@ Measured on `v3` at `fb594a1` with vitest, jsdom and a React 19.2.5 dev build, u
 - With ops disabled, callbacks receive `[]`.
 - `subscribe(p, cb, undefined)`, `useSnapshot(p, undefined)` and `useProxy(p)` don't throw.
 - Every removed argument throws its message.
-- Each `proxyMap` and `proxySet` method that writes notifies once, after `data`, `index` and `epoch` all match. A call that writes nothing doesn't notify.
+- Each `proxyMap` and `proxySet` method that writes notifies once, after `data`, `index` and `epoch` all match. `add` of a value already present and `delete` of a missing key don't notify.
 - `devtools` still sends one message per burst.
 - `devtools` applies an `ACTION`, a jump and an `IMPORT_STATE` in one notification each, with the whole state applied.
 
