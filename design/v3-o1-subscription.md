@@ -38,7 +38,6 @@ These are the decisions the design needs from you. Each one states the proposed 
    - Proposed: accept this for now, and document the [item-hook pattern](#the-item-hook-pattern), which costs O(depth + one item) per write.
    - Removing the copy for the root-hook pattern is a follow-up with a silent behavior change ([Not proposed](#not-proposed-on-demand-materialization)).
 3. **Breaking changes.** Each is proposed as listed in [Migration](#migration):
-   - Replacing a read object with an equal one re-renders (#1162); `applyChanges` is the quiet path.
    - `'k' in snap` and `hasOwn` readers re-render when `k`'s value changes.
    - Getters are live and uncached. A getter that reads state through a closure is untracked, documented only.
    - Assigning a snapshot into state, or calling `proxy(snapshot)`, throws.
@@ -68,6 +67,7 @@ These are the decisions the design needs from you. Each one states the proposed 
 - `snapshot()` keeps its semantics. React renders only immutable snapshots, which is what makes Valtio safe under concurrent rendering.
 - Ops and `unstable_enableOp` are removed, with a replacement that keeps valtio-yjs and valtio-y working ([Dropping ops](#dropping-ops)).
 - `{ keys: true }` and passing the changed keys to key-level callbacks are deferred to a later step, after d5, once the subscription implementation is clear. In d2, every callback is called with no arguments, and a binding diffs snapshots. Without ops, an insert into an array of equal primitives has no recoverable position; that cost comes with dropping ops.
+- Equal replacement is deferred until after d5. Assignment replaces the object, so after `state.user = { name: 'Ann' }` a component that read `user.name` hears the `user` key. The options are: (a) `useSnapshot` compares each value it read under the new object with `Object.is`, and if all are equal, moves its subscriptions to the new object and skips the render; or (b) it re-renders, and `applyChanges` is the workaround. d5 implements (b), the current rule. (a) only removes renders whose output would be the same, so it can be added later without an API change. Both keep #1162 fixed.
 
 **Assumptions from your earlier messages, to confirm:**
 
@@ -476,7 +476,7 @@ A tracked snapshot passed as `next` from an event handler records late reads, an
 | A getter reads state through a closure (`state.count`)                                | Docs                                       | Read through `this`                                                                                    |
 | Snapshot getters aren't cached; object results get a new identity                     | Docs                                       | `proxy-memoize` or `valtio-reactive`                                                                   |
 | `trackMemo` and `getUntracked` from proxy-compare                                     | Docs                                       | `trackKey`; read the proxy in callbacks                                                                |
-| Replacing a read object with equal leaves re-renders                                  | Silent, harmless                           | `applyChanges`                                                                                         |
+| Replacing a read object with equal leaves re-renders (deferred decision; see Decided) | Silent, harmless                           | `applyChanges`                                                                                         |
 | `'k' in snap` and `hasOwn` re-render on value writes                                  | Silent, harmless                           | —                                                                                                      |
 | A key read only in an event handler                                                   | Silent, harmless: at most one extra render | Read the proxy in callbacks                                                                            |
 | `useSnapshot` with no reads no longer subscribes                                      | Silent, harmless                           | Read what you render                                                                                   |
