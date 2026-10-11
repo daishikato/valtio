@@ -33,28 +33,25 @@ The goal is fast atomic mutation. A write like `state.items[5].count++` should c
 
 These are the decisions the design needs from you. Each one states the proposed answer.
 
-1. **What "on-demand subscription" means.** The proposal reads it as "subscribe only to what was read against the committed snapshot", whether during render or later, for example by a child that re-renders on its own. Lazy parent links also remove the version walk. The wide-node snapshot copy stays; see Q2.
-2. **The wide-node copy.** With `useSnapshot(state)` at the root, a write still copies the O(N) object that holds the items.
-   - Proposed: accept this for now, and document the [item-hook pattern](#the-item-hook-pattern), which costs O(depth + one item) per write.
-   - Removing the copy for the root-hook pattern is a follow-up with a silent behavior change ([Not proposed](#not-proposed-on-demand-materialization)).
-3. **Breaking changes.** Each is proposed as listed in [Migration](#migration):
+1. **What "on-demand subscription" means.** The proposal reads it as "subscribe only to what was read against the committed snapshot", whether during render or later, for example by a child that re-renders on its own. Lazy parent links also remove the version walk. The wide-node snapshot copy stays; see [Decided](#decided).
+2. **Breaking changes.** Each is proposed as listed in [Migration](#migration):
    - `'k' in snap` and `hasOwn` readers re-render when `k`'s value changes.
    - Getters are live and uncached. A getter that reads state through a closure is untracked, documented only.
    - Assigning a snapshot into state, or calling `proxy(snapshot)`, throws.
    - A key read only in an event handler subscribes until the snapshot changes: at most one extra render, as in v2.
-4. **New public API, for your strict review:**
+3. **New public API, for your strict review:**
    - vanilla: `subscribe` options, `batch`, `isProxyObject`, `unstable_isRef`, and `getVersion` removed (decided)
    - utils: `applyChanges`
    - react: `trackKey`
    - Also one new entry in `unstable_getInternalStates`, the brand, which `deepClone` and `applyChanges` need.
    - See [Public API](#public-api).
-5. **Names:** `trackKey`, `ownKeys`, `unstable_isRef`.
-6. **Collections:** keep the index in state, following the `versioned-index` branch? This is proposed over a private-symbol copy of the index.
-7. **Following replacement.** `useSnapshot(state.items[id])` keeps listening to a detached item after `state.items[id]` is replaced, which is also true in v3 today. There are three options:
+4. **Names:** `trackKey`, `ownKeys`, `unstable_isRef`.
+5. **Collections:** keep the index in state, following the `versioned-index` branch? This is proposed over a private-symbol copy of the index.
+6. **Following replacement.** `useSnapshot(state.items[id])` keeps listening to a detached item after `state.items[id]` is replaced, which is also true in v3 today. There are three options:
    - Proposed: document the [item-hook pattern](#the-item-hook-pattern). It uses public APIs only.
    - Alternative: ship the recipe as a small hook in `valtio/react/utils`. It adds no vanilla API, but it is one more export.
    - Alternative: `useSnapshot` subscribes itself to the parent key that currently points at its proxy. That needs a new public vanilla signal, because parent links are internal. It also helps only components that re-derive the proxy during render.
-8. **Your remaining preferences**, major and minor.
+7. **Your remaining preferences**, major and minor.
 
 ### Decided
 
@@ -67,7 +64,8 @@ These are the decisions the design needs from you. Each one states the proposed 
 - `snapshot()` keeps its semantics. React renders only immutable snapshots, which is what makes Valtio safe under concurrent rendering.
 - Ops and `unstable_enableOp` are removed, with a replacement that keeps valtio-yjs and valtio-y working ([Dropping ops](#dropping-ops)).
 - `{ keys: true }` and passing the changed keys to key-level callbacks are deferred to a later step, after d5, once the subscription implementation is clear. In d2, every callback is called with no arguments, and a binding diffs snapshots. Without ops, an insert into an array of equal primitives has no recoverable position; that cost comes with dropping ops.
-- Equal replacement is deferred until after d5. Assignment replaces the object, so after `state.user = { name: 'Ann' }` a component that read `user.name` hears the `user` key. The options are: (a) `useSnapshot` compares each value it read under the new object with `Object.is`, and if all are equal, moves its subscriptions to the new object and skips the render; or (b) it re-renders, and `applyChanges` is the workaround. d5 implements (b), the current rule. (a) only removes renders whose output would be the same, so it can be added later without an API change. Both keep #1162 fixed.
+- The wide-node copy is expected. `snapshot()` keeps its semantics, so a component that renders from `useSnapshot(state)` takes `snapshot(state)` when a value it read changes, and that copies every object on the path, including one that holds N items. The workaround is to call `useSnapshot` on the item, as in the [item-hook pattern](#the-item-hook-pattern). Rendering from the held root snapshot with a fresh snapshot of only the changed node swapped in is rejected.
+- Equal replacement is deferred until after d5. Assignment replaces the object, so after `state.user = { name: 'Ann' }` a component that read `user.name` hears the `user` key. The options are: (a) `useSnapshot` compares each value it read under the new object with `Object.is`, and if all are equal, moves its subscriptions to the new object and skips the render; or (b) it re-renders, and `applyChanges` is the workaround. d5 implements (b), the current rule. (a) only removes renders whose output would be the same, so it can be added later without an API change. Its comparison can use a snapshot of only the replaced node, so it costs the size of that node, not of the whole state. Both keep #1162 fixed.
 
 **Assumptions from your earlier messages, to confirm:**
 
