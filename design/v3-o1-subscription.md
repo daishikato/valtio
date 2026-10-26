@@ -60,7 +60,7 @@ These are the decisions the design needs from you. Each one states the proposed 
 - Notifications are sync-only. In PR a, `useSnapshot` pays for a snapshot on every unbatched write, which is accepted with a `TODO` until d5 removes it.
 - PR c re-exports `getUntracked` and `trackMemo`; the d PRs replace them.
 - PR b removes `getVersion`, and adds `unstable_isRef` under that name, since what counts as a ref may change.
-- Parent links are weak, and a subscription keeps its proxy alive until it is unsubscribed ([Versions and lazy parent links](#versions-and-lazy-parent-links)). This changes the contract: call the unsubscribe function when a subscription is no longer needed, rather than relying on garbage collection as in v2. Links that switch between weak and strong are rejected. v3 requires `WeakRef`; on React Native, that means the New Architecture, and old React Native is not supported.
+- Parent links are weak, and a subscription keeps its proxy alive until it is unsubscribed ([Versions and lazy parent links](#versions-and-lazy-parent-links)). This changes the contract: call the unsubscribe function when a subscription is no longer needed, rather than relying on garbage collection as in v2. Links that switch between weak and strong are rejected. v3 requires `WeakRef`; on React Native, that means the New Architecture, and the legacy architecture is not supported.
 - `batch(fn)` returns `fn`'s result, and subscriber errors are thrown from it as an `AggregateError` after delivery finishes. Outside `batch()`, they are rethrown in a microtask, so a write never throws because of a subscriber. A batch that a utility runs internally, such as in `proxyMap`, counts as a write. `subscribeInAsync` is not added.
 - `snapshot()` keeps its semantics. React renders only immutable snapshots, which is what makes Valtio safe under concurrent rendering.
 - Ops and `unstable_enableOp` are removed, with a replacement that keeps valtio-yjs and valtio-y working ([Dropping ops](#dropping-ops)).
@@ -491,7 +491,7 @@ A tracked snapshot passed as `next` from an event handler records late reads, an
 | `useSnapshot` with no reads no longer subscribes                                      | Silent, harmless                           | Read what you render                                                                                   |
 | Deleting an absent key no longer notifies                                             | Silent, harmless                           | —                                                                                                      |
 | A subscribed proxy stays in memory until it is unsubscribed                           | Silent: memory                             | Call the unsubscribe function when done                                                                |
-| React Native's legacy architecture, or any runtime without `WeakRef`                  | Runtime error (4)                          | The New Architecture (the default from React Native 0.76)                                              |
+| React Native's legacy architecture, or any runtime without `WeakRef`                  | Runtime error (4)                          | On React Native, the New Architecture (the default from 0.76); elsewhere, a runtime with `WeakRef`     |
 
 Runtime messages:
 
