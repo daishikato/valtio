@@ -10,7 +10,7 @@ The goal is fast atomic mutation. A write like `state.items[5].count++` should c
 
 - **Vanilla**
   - `subscribe(p, cb, { keys, ownKeys })` listens to direct keys, or to own keys being added or removed.
-  - A write pushes versions up to linked parents, so `snapshot()` stops walking the whole tree.
+  - A write pushes versions up to linked parents, so `snapshot()` stops walking the whole tree. Links are weak references, and a subscription keeps its proxy alive until it is unsubscribed.
   - New exports: `batch`, `isProxyObject`, `unstable_isRef`. `getVersion` is removed; `isProxyObject` replaces its common use as a proxy check.
 - **React**
   - `useSnapshot` subscribes to the keys read against the committed snapshot: in its layout effect for reads made during render, and in a microtask for reads made later.
@@ -60,6 +60,7 @@ These are the decisions the design needs from you. Each one states the proposed 
 - Notifications are sync-only. In PR a, `useSnapshot` pays for a snapshot on every unbatched write, which is accepted with a `TODO` until d5 removes it.
 - PR c re-exports `getUntracked` and `trackMemo`; the d PRs replace them.
 - PR b removes `getVersion`, and adds `unstable_isRef` under that name, since what counts as a ref may change.
+- Parent links are weak, and a subscription keeps its proxy alive until it is unsubscribed ([Versions and lazy parent links](#versions-and-lazy-parent-links)). This changes the contract: call the unsubscribe function when a subscription is no longer needed, rather than relying on garbage collection as in v2. Links that switch between weak and strong are rejected.
 - `batch(fn)` returns `fn`'s result, and subscriber errors are thrown from it as an `AggregateError` after delivery finishes. Outside `batch()`, they are rethrown in a microtask, so a write never throws because of a subscriber. A batch that a utility runs internally, such as in `proxyMap`, counts as a write. `subscribeInAsync` is not added.
 - `snapshot()` keeps its semantics. React renders only immutable snapshots, which is what makes Valtio safe under concurrent rendering.
 - Ops and `unstable_enableOp` are removed, with a replacement that keeps valtio-yjs and valtio-y working ([Dropping ops](#dropping-ops)).
@@ -151,7 +152,7 @@ Each step is its own PR into `v3`, reviewed and merged before the next one start
 | a     | Sync-only notifications and `batch()`                                                                                                                  | —           | Merged as pmndrs/valtio#1256. [Design note](./v3-sync-notifications.md). `useSnapshot` takes a snapshot per unbatched write until d5                                                                                                                                 |
 | b     | `isProxyObject` and `unstable_isRef`; remove `getVersion`                                                                                              | a           | Merged as pmndrs/valtio#1257. `deepClone` and `unstable_deepProxy` take an `isRef` predicate instead of `getRefSet`. Utils stop reading `unstable_getInternalStates` where these suffice. PR a provides the sync-`subscribe` path for change detection               |
 | c     | Embed proxy-compare, dropping what Valtio doesn't use                                                                                                  | —           | Merged as pmndrs/valtio#1258. No behavior change, except that proxy-memoize no longer shares tracking with `useSnapshot` (see Migration). `valtio/react` re-exports `getUntracked` and `trackMemo`. Vanilla still calls the in-tree `markToTrack` and `getUntracked` |
-| d1    | Lazy parent links                                                                                                                                      | —           | No API change; `snapshot()` stops walking the tree                                                                                                                                                                                                                   |
+| d1    | Lazy parent links, held weakly; subscriptions keep their proxy alive                                                                                   | —           | No API change. `snapshot()` stops walking the tree, and subscribing or unsubscribing a linked proxy is O(1). A subscribed proxy stays in memory until it is unsubscribed                                                                                             |
 | d2    | `subscribe(p, cb, { keys, ownKeys })`, an O(1) `subscribeKey`, and no notification for deleting an absent key. Ops and `unstable_enableOp` are removed | a           | Every callback is called with no arguments; bindings diff snapshots until the later step ([Dropping ops](#dropping-ops)). `devtools` names actions from a snapshot diff                                                                                              |
 | d3    | Snapshot semantics: live getters, the brand, the assignment error                                                                                      | c           | Removes vanilla's `getUntracked` unwrap. `deepClone` skips the brand, and the embedded tracker forwards it without recording it                                                                                                                                      |
 | d4    | Collections keep their index in state                                                                                                                  | a           |                                                                                                                                                                                                                                                                      |
@@ -172,13 +173,22 @@ Every write takes one number from a global clock. A proxy's version is the lates
   - a subscription that needs the subtree version internally
   - a subtree `subscribe(p)`
 
-  That first pass is O(subtree), which the first snapshot pays anyway.
+  That first pass is O(subtree), which the first snapshot pays anyway. A link is never undone by an unsubscribe, so later snapshots and subscriptions don't pay it again.
 
-- **Writes.** After that, a write pushes its version to every linked ancestor, in O(depth × parents), and notifies their subtree listeners on the way. A `snapshot` of an unchanged subtree is a cache hit, and registering a subtree listener is O(1).
+- **Links are weak.** A child holds its parent through a `WeakRef`, which each parent creates once, together with the key. A short-lived parent around a long-lived child, such as `proxy({ item: state.item })` created per mount, can then be garbage collected after it is snapshotted.
+- **Writes.** After that, a write pushes its version to every linked ancestor that is still alive, in O(depth × parents), and notifies their subtree listeners on the way. A link whose parent has been collected is removed when a push finds it. A `snapshot` of an unchanged subtree is a cache hit, and registering a subtree listener is O(1).
 - **Children.** A child assigned into a linked parent is linked immediately. Replacing or deleting a child unlinks it.
 - **Cycles and shared children** need only a visited set per write. Versions are pushed rather than recomputed, so the WIP branches' Tarjan-style pass is unnecessary.
+- **Subscriptions keep their proxy alive.** A proxy with at least one listener is held in a module-level set until its last listener is removed. Weak links alone would lose `subscribe(proxy({ a: state.a }), cb)` once the wrapper is dropped: the wrapper would be collected at some point, and writes to `state.a` would stop reaching `cb`. v2 got the same effect from strong links while subscribed.
+- **The contract changes.** Call the unsubscribe function when a subscription is no longer needed. In v2, a subscribed proxy that nothing else reached was garbage collected together with its callback. In v3 it stays in memory until it is unsubscribed; the callback can't run again, because nothing can write to it. Nothing observable depends on garbage collection: a dropped parent can't be snapshotted or subscribed, so whether pushes still reach it can't be seen.
+- **Runtime.** `WeakRef` is ES2021, like the `AggregateError` that PR a uses. Hermes has it, but React Native has to enable Hermes's microtask queue for it; this needs checking for the React Native versions v3 supports.
 
 The alternative is linking every child at creation. It only makes a difference for state that is never snapshotted or subscribed, which would then pay O(depth) per write for nothing.
+
+Two other designs are rejected:
+
+- Strong links that last only while something is subscribed, which is v2's listener mechanism. An unsubscribed `snapshot()` keeps walking the tree, and the first subscribe and the last unsubscribe of a proxy each walk its subtree.
+- Weak links that turn strong while subscribed. They keep v2's garbage collection behavior, but need two kinds of link and a pass that switches them.
 
 ### Listeners
 
@@ -480,6 +490,7 @@ A tracked snapshot passed as `next` from an event handler records late reads, an
 | A key read only in an event handler                                                   | Silent, harmless: at most one extra render | Read the proxy in callbacks                                                                            |
 | `useSnapshot` with no reads no longer subscribes                                      | Silent, harmless                           | Read what you render                                                                                   |
 | Deleting an absent key no longer notifies                                             | Silent, harmless                           | —                                                                                                      |
+| A subscribed proxy stays in memory until it is unsubscribed                           | Silent: memory                             | Call the unsubscribe function when done                                                                |
 
 Runtime messages:
 
@@ -516,6 +527,11 @@ The closure-getter row is the riskiest, because v2's computed-properties guide i
 
 Each item becomes a test in the PR it covers.
 
+- **Weak links (d1)**, run with `--expose-gc`:
+  - A snapshotted wrapper around a long-lived child is collected after it is dropped, and the child's later writes still work.
+  - `subscribe(proxy({ a: state.a }), cb)` with the wrapper dropped keeps calling `cb` after a collection; after unsubscribe, the wrapper is collected.
+  - Nested writes, replacing and deleting a child, cycles and shared children give the same snapshots as `v3` today.
+- **`WeakRef` on React Native**: confirm it is available on the React Native versions v3 supports.
 - **#1160 benchmark**, committed this time. It covers both component patterns at N = 1,000, 5,000 and 50,000, and reports components woken, write-to-commit time, and `snapshot` calls per write.
 - **Render→commit gaps.** A child's layout effect, and a later sibling's, each write a key first read in this render. Both writes are in the DOM before the passive phase.
 - **Renders that never commit**: Strict Mode, an interrupted transition, and a render that suspends. A render that took a new snapshot leaves no listener behind. A render on the committed snapshot adds only late reads, which are dropped when the snapshot changes.
