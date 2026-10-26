@@ -60,7 +60,7 @@ These are the decisions the design needs from you. Each one states the proposed 
 - Notifications are sync-only. In PR a, `useSnapshot` pays for a snapshot on every unbatched write, which is accepted with a `TODO` until d5 removes it.
 - PR c re-exports `getUntracked` and `trackMemo`; the d PRs replace them.
 - PR b removes `getVersion`, and adds `unstable_isRef` under that name, since what counts as a ref may change.
-- Parent links are weak, and a subscription keeps its proxy alive until it is unsubscribed ([Versions and lazy parent links](#versions-and-lazy-parent-links)). This changes the contract: call the unsubscribe function when a subscription is no longer needed, rather than relying on garbage collection as in v2. Links that switch between weak and strong are rejected.
+- Parent links are weak, and a subscription keeps its proxy alive until it is unsubscribed ([Versions and lazy parent links](#versions-and-lazy-parent-links)). This changes the contract: call the unsubscribe function when a subscription is no longer needed, rather than relying on garbage collection as in v2. Links that switch between weak and strong are rejected. v3 requires `WeakRef`; on React Native, that means the New Architecture, and old React Native is not supported.
 - `batch(fn)` returns `fn`'s result, and subscriber errors are thrown from it as an `AggregateError` after delivery finishes. Outside `batch()`, they are rethrown in a microtask, so a write never throws because of a subscriber. A batch that a utility runs internally, such as in `proxyMap`, counts as a write. `subscribeInAsync` is not added.
 - `snapshot()` keeps its semantics. React renders only immutable snapshots, which is what makes Valtio safe under concurrent rendering.
 - Ops and `unstable_enableOp` are removed, with a replacement that keeps valtio-yjs and valtio-y working ([Dropping ops](#dropping-ops)).
@@ -181,7 +181,7 @@ Every write takes one number from a global clock. A proxy's version is the lates
 - **Cycles and shared children** need only a visited set per write. Versions are pushed rather than recomputed, so the WIP branches' Tarjan-style pass is unnecessary.
 - **Subscriptions keep their proxy alive.** A proxy with at least one listener is held in a module-level set until its last listener is removed. The set holds the same object that its children's `WeakRef`s point to, so a pinned parent can't lose its links. It covers every registration that needs pushes, including an internal subtree subscriber such as d5's, not only `subscribe` callbacks. Weak links alone would lose `subscribe(proxy({ a: state.a }), cb)` once the wrapper is dropped: the wrapper would be collected at some point, and writes to `state.a` would stop reaching `cb`. v2 got the same effect from strong links while subscribed.
 - **The contract changes.** Call the unsubscribe function when a subscription is no longer needed. In v2, a subscribed proxy that nothing else reached was garbage collected together with its callback. In v3 it stays in memory until it is unsubscribed. If nothing reaches it, not even through a child that is still in use, its callback can't run again, so the cost is memory only. Nothing observable depends on garbage collection: a dropped parent can't be snapshotted or subscribed, so whether pushes still reach it can't be seen.
-- **Runtime.** `WeakRef` is ES2021. Hermes exposes it only when its microtask queue is integrated, which React Native does only on the New Architecture (from 0.75, per review). The New Architecture is the default from 0.76 and the only one from 0.82. On the legacy architecture, `WeakRef` is undefined. Open: require the New Architecture on React Native, or ship a strong-link fallback there, which brings the leak back.
+- **Runtime.** `WeakRef` is ES2021. Hermes exposes it only when its microtask queue is integrated, which React Native does only on the New Architecture (from 0.75, per review). The New Architecture is the default from 0.76 and the only one from 0.82. On the legacy architecture, `WeakRef` is undefined. Decided: v3 requires `WeakRef`, so React Native needs the New Architecture; `proxy()` throws a clear error without it. There is no strong-link fallback.
 
 The alternative is linking every child at creation. It only makes a difference for state that is never snapshotted or subscribed, which would then pay O(depth) per write for nothing.
 
@@ -491,12 +491,14 @@ A tracked snapshot passed as `next` from an event handler records late reads, an
 | `useSnapshot` with no reads no longer subscribes                                      | Silent, harmless                           | Read what you render                                                                                   |
 | Deleting an absent key no longer notifies                                             | Silent, harmless                           | —                                                                                                      |
 | A subscribed proxy stays in memory until it is unsubscribed                           | Silent: memory                             | Call the unsubscribe function when done                                                                |
+| React Native's legacy architecture, or any runtime without `WeakRef`                  | Runtime error (4)                          | The New Architecture (the default from React Native 0.76)                                              |
 
 Runtime messages:
 
 1. `notifyInSync has been removed. subscribe() is synchronous. Use batch() to group notifications.`
 2. `useSnapshot() no longer accepts an options argument. Updates are synchronous.`
 3. `Cannot assign a Valtio snapshot into a proxy. Copy it with deepClone(), merge it with applyChanges(), or wrap it with ref() to store it as is.`
+4. `Valtio requires WeakRef. On React Native, use the New Architecture.`
 
 The closure-getter row is the riskiest, because v2's computed-properties guide itself used `state.count` inside getters. The guide has to change in the same release.
 
@@ -531,7 +533,7 @@ Each item becomes a test in the PR it covers.
   - A snapshotted wrapper around a long-lived child is collected after it is dropped, and the child's later writes still work.
   - `subscribe(proxy({ a: state.a }), cb)` with the wrapper dropped keeps calling `cb` after a collection; after unsubscribe, the wrapper is collected.
   - Nested writes, replacing and deleting a child, cycles and shared children give the same snapshots as `v3` today.
-- **`WeakRef` on React Native**: confirm it is defined on the New Architecture from the version v3 requires.
+- **No `WeakRef`**: `proxy()` throws the runtime message (4).
 - **#1160 benchmark**, committed this time. It covers both component patterns at N = 1,000, 5,000 and 50,000, and reports components woken, write-to-commit time, and `snapshot` calls per write.
 - **Render→commit gaps.** A child's layout effect, and a later sibling's, each write a key first read in this render. Both writes are in the DOM before the passive phase.
 - **Renders that never commit**: Strict Mode, an interrupted transition, and a render that suspends. A render that took a new snapshot leaves no listener behind. A render on the committed snapshot adds only late reads, which are dropped when the snapshot changes.
