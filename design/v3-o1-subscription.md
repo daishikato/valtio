@@ -11,6 +11,7 @@ Simple and predictable. The implementation follows clear contracts, and the docs
 - When an edge case has a reasonable workaround on the user's side, the code doesn't handle it. The docs state the limit and the workaround.
 - Code that exists only for such an edge case is removed, even if it is already merged.
 - This applies to every step in the [delivery plan](#delivery-plan), to the reviews of each step, and to the code base as a whole. The review step checks the existing code against it.
+- Outside reviewers don't know this policy. Each review finding is checked against it first. A finding that asks to handle an edge case with a reasonable workaround is declined, and the documented limit is the answer.
 
 ## At a glance
 
@@ -36,7 +37,7 @@ The goal is fast atomic mutation. A write like `state.items[5].count++` should c
   - b) `isProxyObject` and `unstable_isRef`, and removal of `getVersion`
   - c) proxy-compare embedded
   - d1–d6) the subscription work
-  - review) the whole code base checked against the [design policy](#design-policy), after d2
+  - review) the whole code base checked against the [design policy](#design-policy), started with d2
 
 ## Questions for you
 
@@ -164,7 +165,7 @@ Each step is its own PR into `v3`, reviewed and merged before the next one start
 | c      | Embed proxy-compare, dropping what Valtio doesn't use                                                                                                  | —           | Merged as pmndrs/valtio#1258. No behavior change, except that proxy-memoize no longer shares tracking with `useSnapshot` (see Migration). `valtio/react` re-exports `getUntracked` and `trackMemo`. Vanilla still calls the in-tree `markToTrack` and `getUntracked`                 |
 | d1     | Lazy parent links, held weakly; subscriptions keep their proxy alive                                                                                   | —           | Merged as pmndrs/valtio#1260. No API change. `snapshot()` stops walking the tree, and subscribing or unsubscribing a linked proxy is O(1). A subscribed proxy stays in memory until it is unsubscribed. A write reaches nearer ancestors first, through a loop rather than recursion |
 | d2     | `subscribe(p, cb, { keys, ownKeys })`, an O(1) `subscribeKey`, and no notification for deleting an absent key. Ops and `unstable_enableOp` are removed | a           | Opened as pmndrs/valtio#1261. Every callback is called with no arguments; bindings diff snapshots until the later step ([Dropping ops](#dropping-ops)). `devtools` names actions from a snapshot diff                                                                                |
-| review | The whole code base and the rest of this design, checked against the [design policy](#design-policy)                                                   | d2          | Removes code that only handles an edge case with a reasonable workaround, and documents the limit instead. It may take more than one PR. Later steps follow the policy from the start                                                                                                |
+| review | The whole code base and the rest of this design, checked against the [design policy](#design-policy)                                                   | —           | Started with d2; see [Review against the design policy](#review-against-the-design-policy). Removes code that only handles an edge case with a reasonable workaround, and documents the limit instead. Later steps follow the policy from the start                                  |
 | d3     | Snapshot semantics: live getters, the brand, the assignment error                                                                                      | c           | Removes vanilla's `getUntracked` unwrap. `deepClone` skips the brand, and the embedded tracker forwards it without recording it                                                                                                                                                      |
 | d4     | Collections keep their index in state                                                                                                                  | a           |                                                                                                                                                                                                                                                                                      |
 | d6     | `applyChanges`                                                                                                                                         | a, d3       | Lands before d5, so the quiet path for replacement exists before the equal-replacement break                                                                                                                                                                                         |
@@ -172,6 +173,24 @@ Each step is its own PR into `v3`, reviewed and merged before the next one start
 | later  | `{ keys: true }`, and the changed keys as the argument of key-level callbacks                                                                          | d2, d5      | Deferred until the implementation is clear. Additive: d2 rejects `keys: true`, and callbacks without a parameter stay valid                                                                                                                                                          |
 
 Each PR updates the docs for what it changes, including its section of the migration guide that is now on `v3`. A final pass reviews the guide as a whole and documents the item-hook pattern. Tests from the WIP branches are ported into the PR whose behavior they cover.
+
+### Review against the design policy
+
+The whole code base was read against the [design policy](#design-policy) while d2 was open.
+
+- **d2, applied in pmndrs/valtio#1261:**
+  - The search for the indices a shorter `length` removes is one loop over the indices past it, run only when the array has children or key listeners.
+  - `Object.defineProperty` on a proxy isn't tracked, and the gotchas page says so: getters belong in the object passed to `proxy()`, and other properties stay writable and configurable. `subscribeKey` detects a getter when subscribing.
+  - A sparse array with children or key listeners visits each index past a shorter length; the PR states it.
+  - The binding sketch test is dropped. It tested a sketch of a sync algorithm, not Valtio, and the behavior it relied on has its own tests.
+- **d1, merged:**
+  - Kept: the sweep of dead parent links. A wrapper created per mount around a long-lived child is a common pattern, and without the sweep the child's links grow until it is written.
+  - Open: a parent link is typed by its `deref()` shape, and `tests/declarations.test.ts` type-checks the published declarations with the ES2020 lib. Both exist only for apps whose TypeScript `lib` lacks ES2021, which can add ES2021, as `WeakRef` needs at runtime, or use `skipLibCheck`.
+- **Rewritten by later steps, which apply the policy then:**
+  - d3 and d5: vanilla's `getUntracked` unwrap in the set trap, and its `markToTrack` calls in `snapshot`.
+  - d4: the per-snapshot index copy in `proxyMap` and `proxySet`, and `proxySet`'s support for set-like arguments that have only `forEach`.
+  - d5: `useSnapshot` calling back once on subscribe, its `try`/`catch` around `isChanged`, and `useProxy`'s render flag.
+- **Kept as they are:** `deepClone`, `unstable_deepProxy`, `subscribeKey`, the delivery and error handling of `batch`, and `devtools`, whose diff reads the proxy so that a replaced `Date` is named, and compares a shared object on each path so that a change isn't lost.
 
 ## Vanilla
 
@@ -580,7 +599,7 @@ Each item becomes a test in the PR it covers.
   - A set to `undefined` stays `in p`.
 - **Equal replacement, option (a) (if adopted after d5)**: `state.nested = { count: 0 }` doesn't re-render a component that read `nested.count`, and a later `state.nested.count = 1` does.
 - **`subscribeKey` order (d2)**: a callback for `a` writes `b`; `subscribeKey(state, 'b', …)` runs after every subscriber has received `a`, in the round that delivers `b`.
-- **Binding sketch (d2, then the later step)**: a minimal Y.Map / Y.Array binding, first on a snapshot diff and then on `{ keys: true }`, round-trips `push`, `unshift` of a value equal to the tail, `sort`, and two splices in one `batch`, and keeps Y item identity for moved containers.
+- **Bindings (d2)**: no binding is kept in the tests. The migration guide shows the per-container diff, and the behavior it relies on, one callback per batch, key subscriptions and snapshot identity, has its own tests.
 - **Tearing (d5)**: run the tearing checks from will-this-react-global-state-work-in-concurrent-rendering, since the suite covers concurrent rendering only partly.
 - **Burst of writes (d5)**: the loop from the [appendix](#appendix-evidence-and-references) takes no per-write snapshot.
 - **Bundle**: report minified and gzipped sizes against `v3` plus proxy-compare (6,188 / 2,985 B) and the WIP candidate (10,533 / 4,431 B).
