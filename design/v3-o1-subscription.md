@@ -1,6 +1,6 @@
 # Valtio v3 O(1) Subscription — Design Proposal
 
-**Status: proposal for maintainer review.** The delivery plan and a few points are decided; see [Decided](#decided). Everything else is still a proposal, and nothing is implemented. It merges two agent drafts: this one and #2, which is now closed. Where the drafts disagreed, the review threads on #2 and #3 settled the point, and this document states the result.
+**Status: proposal for maintainer review.** The delivery plan and a few points are decided; see [Decided](#decided). Steps a, b, c and d1 are merged, and d2 is open; see the [delivery plan](#delivery-plan). Everything else is still a proposal. It merges two agent drafts: this one and #2, which is now closed. Where the drafts disagreed, the review threads on #2 and #3 settled the point, and this document states the result.
 
 **How to read it.** Start with the [design policy](#design-policy), [At a glance](#at-a-glance) and [Questions for you](#questions-for-you), which together fit on about two screens. The later sections give the detail for each layer, and the appendix holds the measurements.
 
