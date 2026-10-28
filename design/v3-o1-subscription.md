@@ -56,6 +56,7 @@ These are the decisions the design needs from you. Each one states the proposed 
 ### Decided
 
 - This document is the design of record; #2 is closed.
+- Simple, predictable logic and contracts come first, across the code base. An edge case that users can work around is documented rather than handled in code.
 - The work lands as separate PRs into `v3`, in the order in the [delivery plan](#delivery-plan).
 - Notifications are sync-only. In PR a, `useSnapshot` pays for a snapshot on every unbatched write, which is accepted with a `TODO` until d5 removes it.
 - PR c re-exports `getUntracked` and `trackMemo`; the d PRs replace them.
