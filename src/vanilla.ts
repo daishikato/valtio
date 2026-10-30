@@ -1,4 +1,4 @@
-import { getUntracked, markToTrack } from './vanilla/proxyCompare.js'
+import { markToTrack } from './vanilla/proxyCompare.js'
 
 const isObject = (x: unknown): x is object =>
   typeof x === 'object' && x !== null
@@ -92,6 +92,11 @@ const createSnapshotDefault = <T extends object>(
     snap.length = target.length
   }
   markToTrack(snap, true) // mark to track
+  // Configurable, so that createProxy doesn't copy the snapshot.
+  Object.defineProperty(snap, snapshotBrand, {
+    value: true,
+    configurable: true,
+  })
   snapCache.set(target, [version, snap])
   Reflect.ownKeys(target).forEach((key) => {
     if (Object.getOwnPropertyDescriptor(snap, key)) {
@@ -162,9 +167,6 @@ const createHandlerDefault = <T extends object>(
         ? findRemovedIndices(Number(value))
         : []
     removeChildListener(key)
-    if (isObject(value)) {
-      value = getUntracked(value) || value
-    }
     const nextValue =
       !proxyStateMap.has(value) && canProxy(value) ? proxy(value) : value
     addChildListener(key, nextValue)
@@ -197,6 +199,8 @@ const snapCache: WeakMap<object, [version: number, snap: unknown]> =
   new WeakMap()
 const versionHolder = [1] as [number]
 const proxyCache: WeakMap<object, ProxyObject> = new WeakMap()
+// Every snapshot object has this as a non-enumerable own key.
+const snapshotBrand: unique symbol = Symbol()
 // Children reach their parents only through WeakRef, so a proxy with
 // listeners is held here until they are removed. Through its handler, it
 // keeps alive the visit function that the WeakRefs point to.
@@ -302,6 +306,11 @@ let createHandler: typeof createHandlerDefault = createHandlerDefault
 export function proxy<T extends object>(baseObject: T = {} as T): T {
   if (!isObject(baseObject)) {
     throw new Error('object required')
+  }
+  if (hasOwn(baseObject, snapshotBrand)) {
+    throw new Error(
+      'Cannot assign a Valtio snapshot into a proxy. Copy it with deepClone(), or wrap it with ref() to store it as is.',
+    )
   }
   if (typeof WeakRef === 'undefined') {
     throw new Error(
@@ -610,6 +619,7 @@ export function unstable_getInternalStates(): {
   versionHolder: typeof versionHolder
   proxyCache: typeof proxyCache
   batchAsWrite: typeof batchAsWrite
+  snapshotBrand: typeof snapshotBrand
 } {
   return {
     proxyStateMap,
@@ -618,6 +628,7 @@ export function unstable_getInternalStates(): {
     versionHolder,
     proxyCache,
     batchAsWrite,
+    snapshotBrand,
   }
 }
 

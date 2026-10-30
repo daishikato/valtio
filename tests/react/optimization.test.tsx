@@ -1,7 +1,7 @@
 import { Suspense, startTransition, useLayoutEffect, useState } from 'react'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { proxy, snapshot, useSnapshot } from 'valtio'
+import { proxy, useSnapshot } from 'valtio'
 import { useCommitCount } from '../test-utils.js'
 
 describe('optimization', () => {
@@ -58,7 +58,7 @@ describe('optimization', () => {
     expect(renderFn).toBeCalledTimes(2)
   })
 
-  it('should not track snapshots assigned outside render', async () => {
+  it('should throw for a tracked snapshot assigned into state', async () => {
     const source = proxy({ nested: { count: 0, other: 0 } })
     const destination = proxy<{ value?: object }>({})
     let nested!: object
@@ -71,32 +71,16 @@ describe('optimization', () => {
     }
 
     render(<Component />)
-    destination.value = nested
-    snapshot(destination)
+    expect(() => {
+      destination.value = nested
+    }).toThrow('Cannot assign a Valtio snapshot into a proxy.')
+    expect(() => {
+      destination.value = { nested }
+    }).toThrow('Cannot assign a Valtio snapshot into a proxy.')
+
+    // the check doesn't subscribe the component to anything
     source.nested.other = 1
     await act(() => vi.advanceTimersByTimeAsync(0))
-
-    expect(renderFn).toHaveBeenCalledTimes(1)
-  })
-
-  it('should unwrap nested snapshots assigned outside render', async () => {
-    const source = proxy({ nested: { count: 0, other: 0 } })
-    const destination = proxy<{ value: { nested?: object } }>({ value: {} })
-    let nested!: object
-    const renderFn = vi.fn()
-    const Component = () => {
-      const tracked = useSnapshot(source)
-      nested = tracked.nested
-      renderFn(tracked.nested.count)
-      return null
-    }
-
-    render(<Component />)
-    destination.value = { nested }
-    snapshot(destination)
-    source.nested.other = 1
-    await act(() => vi.advanceTimersByTimeAsync(0))
-
     expect(renderFn).toHaveBeenCalledTimes(1)
   })
 
