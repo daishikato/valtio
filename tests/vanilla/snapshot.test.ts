@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
-import { proxy, snapshot } from 'valtio'
+import { proxy, ref, snapshot } from 'valtio'
 import type { Snapshot } from 'valtio'
+import { deepClone, proxyMap } from 'valtio/utils'
 
 describe('snapshot', () => {
   it('should return correct snapshots without subscribe', async () => {
@@ -34,13 +35,6 @@ describe('snapshot', () => {
       value: 1,
       writable: false,
     })
-  })
-
-  it('should create a new proxy from a snapshot', async () => {
-    const state = proxy({ c: 0 })
-    const snap1 = snapshot(state)
-    const state2 = proxy(snap1)
-    expect(state2.c).toBe(0)
   })
 
   it('should not change snapshot with modifying the original proxy', async () => {
@@ -246,5 +240,57 @@ describe('snapshot', () => {
 
       expectTypeOf<A>().toEqualTypeOf<B>()
     })
+  })
+})
+
+describe('snapshot brand', () => {
+  const message =
+    'Cannot assign a Valtio snapshot into a proxy. Copy it with deepClone(), or wrap it with ref() to store it as is.'
+
+  it('throws for proxy(snapshot)', () => {
+    const snap = snapshot(proxy({ count: 0 }))
+    expect(() => proxy(snap)).toThrow(message)
+  })
+
+  it('throws for a snapshot assigned into state, directly or nested', () => {
+    const state = proxy<{ value?: object; list: object[] }>({ list: [] })
+    const snap = snapshot(proxy({ child: { count: 0 } }))
+
+    expect(() => {
+      state.value = snap
+    }).toThrow(message)
+    expect(() => {
+      state.value = { child: snap.child }
+    }).toThrow(message)
+    expect(() => state.list.push(snap)).toThrow(message)
+    expect(state.value).toBeUndefined()
+    expect(state.list).toEqual([])
+  })
+
+  it('throws for a snapshot set in a proxyMap', () => {
+    const map = proxyMap<string, object>()
+    const snap = snapshot(proxy({ count: 0 }))
+    expect(() => map.set('a', snap)).toThrow(message)
+  })
+
+  it('stores a snapshot wrapped with ref as is', () => {
+    const state = proxy<{ history: object[] }>({ history: [] })
+    const snap = snapshot(proxy({ count: 0 }))
+    state.history.push(ref(snap))
+    expect(state.history[0]).toBe(snap)
+  })
+
+  it('makes a proxy from a deep clone of a snapshot', () => {
+    const snap = snapshot(proxy({ child: { count: 0 } }))
+    const state = proxy<{ child: { count: number } }>(deepClone(snap))
+    state.child.count = 1
+    expect(state.child.count).toBe(1)
+  })
+
+  it('leaves the brand out of Object.keys, spread and JSON', () => {
+    const snap = snapshot(proxy({ count: 0 }))
+    expect(Object.keys(snap)).toEqual(['count'])
+    expect(proxy({ ...snap }).count).toBe(0)
+    expect(proxy(JSON.parse(JSON.stringify(snap))).count).toBe(0)
   })
 })
