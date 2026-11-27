@@ -190,6 +190,8 @@ snap.doubled = 2
 
 A setter called on the proxy runs with the proxy as `this`, so `this.count = newValue / 2` writes the state, and subscribers are notified.
 
+A change that a setter makes in place to an object that isn't proxied, such as `this.date.setTime(value)`, writes nothing in the state. The assignment notifies the setter's key, which a component hears once it has subscribed, when it commits. So such a change made before that, such as in a child's layout effect, isn't seen until the component renders again. Assign a new object instead, such as `this.date = new Date(value)`.
+
 A snapshot leaves the setter out, so `snap.doubled = 2` is a compile error, and fails at runtime in strict mode.
 
 ## Class getters and setters

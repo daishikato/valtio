@@ -143,9 +143,9 @@ const createSnapshotDefault = <T extends object>(
 const hasOwn = (obj: object, key: string | symbol): boolean =>
   Object.prototype.hasOwnProperty.call(obj, key)
 
-// In development, a getter of a snapshot warns once if it reads a proxy or
-// takes a snapshot while it runs. It can reach a proxy only through a
-// closure, and such a read isn't tracked.
+// In development, a getter of a snapshot warns once if it reads a proxy
+// while it runs. It can reach a proxy only through a closure, and such a
+// read isn't tracked.
 let runningGetter: readonly [get: AnyFunction, key: string | symbol] | undefined
 const warnedGetters = new WeakSet<AnyFunction>()
 const watchedGetters = new WeakMap<AnyFunction, AnyFunction>()
@@ -665,9 +665,6 @@ export function snapshot<T extends object>(proxyObject: T): Snapshot<T> {
   const proxyState = proxyStateMap.get(proxyObject as object)
   if (process.env.NODE_ENV !== 'production' && !proxyState) {
     console.warn('Please use proxy object')
-  }
-  if (process.env.NODE_ENV !== 'production') {
-    warnInGetter()
   }
   const [target, ensureVersion] = proxyState as ProxyState
   return createSnapshot(target, ensureVersion()) as Snapshot<T>

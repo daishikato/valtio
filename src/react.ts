@@ -5,12 +5,7 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react'
-import {
-  isProxyObject,
-  snapshot,
-  subscribe,
-  unstable_isRef,
-} from './vanilla.js'
+import { isProxyObject, snapshot, subscribe } from './vanilla.js'
 import type { Snapshot } from './vanilla.js'
 
 type Key = string | symbol
@@ -100,19 +95,8 @@ const ownValue = (obj: object, key: Key): unknown => {
 const isStale = (node: Node, [kind, key]: Entry): boolean => {
   const p = node.p
   switch (kind) {
-    case VALUE: {
-      const value = node.values.get(key!)
-      const kid = node.kids.get(key!)
-      return (
-        !Object.is(value, ownValue(p, key!)) ||
-        // A kid stands for the proxy that its snapshot object was taken
-        // from, and a getter can read anything under its object, also an
-        // object that isn't proxied.
-        (kid
-          ? snapshot(kid.p) !== kid.s
-          : value === GETTER && snapshot(p) !== node.s)
-      )
-    }
+    case VALUE:
+      return !Object.is(node.values.get(key!), ownValue(p, key!))
     case IN:
       return node.ins.get(key!) !== Reflect.has(p, key!)
     case OWN:
@@ -161,9 +145,7 @@ const trackedNodes = new WeakMap<object, [Hook, Node]>()
 
 const getNode = (hook: Hook, s: object, p: object): Node => {
   let node = hook.nodes.get(s)
-  // A read from an old tracked object can find its snapshot object under
-  // another proxy, which a check then finds. That binding isn't kept.
-  if (node?.p === p) {
+  if (node) {
     return node
   }
   const values = new Map<Key, unknown>()
@@ -180,17 +162,12 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
       const own = ownValue(s, key)
       if (!values.has(key)) {
         const live = isObject(own) && ownValue(p, key)
-        // An object of the snapshot stands for the proxy that is under the
-        // key now. If that changed, a check finds it.
-        // A snapshot object has the prototype of the object that it was
-        // taken from, so an object of another kind, such as a Date, isn't
-        // one. Neither is an object marked with ref, which is kept as it is.
+        // An object stands for the proxy under the key if it is that proxy's
+        // current snapshot. Anything else, such as a Date, an object marked
+        // with ref, or the snapshot of a proxy that changed since, is
+        // returned as it is, and the read is stale.
         const kid =
-          isProxyObject(live) &&
-          live !== own &&
-          !isProxyObject(own) &&
-          !unstable_isRef(own) &&
-          Object.getPrototypeOf(live) === Object.getPrototypeOf(own)
+          isProxyObject(live) && snapshot(live as object) === own
             ? getNode(hook, own as object, live as object)
             : undefined
         if (kid) {

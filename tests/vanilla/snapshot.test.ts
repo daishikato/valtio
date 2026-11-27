@@ -348,19 +348,6 @@ describe('snapshot getters', () => {
     expect(consoleWarn).not.toHaveBeenCalled()
     consoleWarn.mockRestore()
   })
-
-  it('[DEV-ONLY] should warn when a getter takes a snapshot while it runs on a snapshot', () => {
-    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const other = proxy({ count: 1 })
-    const state = proxy({
-      get count(): number {
-        return snapshot(other).count
-      },
-    })
-    expect(snapshot(state).count).toBe(1)
-    expect(consoleWarn).toHaveBeenCalledTimes(1)
-    consoleWarn.mockRestore()
-  })
 })
 
 describe('snapshot brand', () => {

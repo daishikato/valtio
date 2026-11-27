@@ -334,6 +334,42 @@ describe('subscriptions', () => {
     expect(screen.getByText('b: 1')).toBeInTheDocument()
   })
 
+  it('should keep the tracked object of a shared snapshot when a late read finds another proxy', async () => {
+    const shared = proxy({ count: 0 })
+    const state = proxy({ a: shared, b: shared, other: 0 })
+    const received: unknown[] = []
+    const Child = memo(function Child({ b }: { b: { count: number } }) {
+      received.push(b)
+      return <div>b: {b.count}</div>
+    })
+    const Component = () => {
+      const tracked = useSnapshot(state)
+      return (
+        <button
+          onClick={() => {
+            // a late read, made after state.a became another proxy
+            void tracked.a.count
+          }}
+        >
+          other: {tracked.other}
+          <Child b={tracked.b} />
+        </button>
+      )
+    }
+    render(<Component />)
+    act(() => {
+      state.a = { count: 0 }
+    })
+    fireEvent.click(screen.getByText('other: 0'))
+    await act(() => Promise.resolve())
+
+    act(() => {
+      state.other = 1
+    })
+    expect(screen.getByText('other: 1')).toBeInTheDocument()
+    expect(received).toHaveLength(1)
+  })
+
   it('should re-render when a getter is replaced by a value', () => {
     const state = proxy<{ value: number }>({
       get value() {
@@ -427,7 +463,7 @@ describe('subscriptions', () => {
     expect(screen.getByText('label: new')).toBeInTheDocument()
   })
 
-  it('should not wrap an object that is not a snapshot of the proxy now there', () => {
+  it('should not wrap an object that is not a snapshot of the proxy now there', async () => {
     const item = ref({ count: 0 })
     const state = proxy<{ at: object; item: object }>({
       at: new Date(0),
@@ -454,18 +490,19 @@ describe('subscriptions', () => {
       state.item = { count: 1 }
     })
     fireEvent.click(screen.getByText('button'))
+    await act(() => Promise.resolve())
     expect(read[0]).toBe(0)
     expect(read[1]).toBe(item)
   })
 
-  it("should show a setter that mutates an object in place in a child's layout effect before paint", () => {
+  it("should show a setter that assigns a new object in a child's layout effect before paint", () => {
     const state = proxy({
       date: new Date(0),
       get timestamp() {
         return this.date.getTime()
       },
       set timestamp(value: number) {
-        this.date.setTime(value)
+        this.date = new Date(value)
       },
     })
     const Writer = () => {
@@ -484,6 +521,52 @@ describe('subscriptions', () => {
       )
     }
     expect(renderBeforePaint(<Reader />)).toBe('time: 1000')
+  })
+
+  it("should not re-render for an unrelated write from a child's layout effect", () => {
+    const state = proxy({
+      item: { count: 0, unrelated: 0 },
+      unrelated: 0,
+      get double() {
+        return this.item.count * 2
+      },
+    })
+    const renders = vi.fn()
+    const Writer = () => {
+      useLayoutEffect(() => {
+        state.item.unrelated++
+        state.unrelated++
+      })
+      return null
+    }
+    const Reader = () => {
+      const tracked = useSnapshot(state)
+      renders()
+      return (
+        <>
+          <div>{`count: ${tracked.item.count}, double: ${tracked.double}`}</div>
+          <Writer />
+        </>
+      )
+    }
+    render(<Reader />)
+    expect(screen.getByText('count: 0, double: 0')).toBeInTheDocument()
+    expect(renders).toHaveBeenCalledTimes(1)
+  })
+
+  it('[DEV-ONLY] should not warn for a getter that reads an object through this', () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const state = proxy({
+      items: [{ count: 1 }],
+      get first() {
+        return this.items[0]!.count
+      },
+    })
+    const Component = () => <div>first: {useSnapshot(state).first}</div>
+    render(<Component />)
+    expect(screen.getByText('first: 1')).toBeInTheDocument()
+    expect(consoleWarn).not.toHaveBeenCalled()
+    consoleWarn.mockRestore()
   })
 
   it('should drop its subscriptions on unmount', () => {
