@@ -314,7 +314,7 @@ Snapshots stay plain objects with read-only data properties and their original p
 - An own getter is copied to the snapshot as an accessor, not evaluated. Each access runs it with the snapshot, or React's tracked snapshot, as `this`. The reads it makes through `this` are React's subscription, so a root `get total()` does not subscribe to the whole store.
 - Results are not cached, so an object-returning getter returns a new identity on each access. Exceptions surface on access, not in `snapshot()`.
 - A getter that reads `state.count` through a closure reads live state and is not tracked. In development, a snapshot getter is wrapped, and a proxy read or a `snapshot()` call while it runs warns once per getter, naming it. A getter with no dependencies reads no proxy, so it doesn't warn.
-- Own setters are left out of snapshots. Class accessors on the prototype behave as today.
+- Own setters are left out of snapshots, and a key with only a setter stays an accessor without a getter, so that it reads as one in both. Class accessors on the prototype behave as today.
 
 **The brand and the assignment error**
 
