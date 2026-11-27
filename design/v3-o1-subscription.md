@@ -461,17 +461,17 @@ This needs no vanilla API beyond this proposal's, so it can be a follow-up.
 
 For each own enumerable key of `next`, where `cur = proxy[k]` and `v = next[k]`:
 
-1. Skip `v` if `Object.is(cur, v)`, or if `v` is a snapshot and `snapshot(cur) === v`. The second test skips unchanged subtrees of an immutable update in O(1).
-2. Skip accessors. Snapshots of state with getters carry them, and the proxy already has its own. This keeps `applyChanges(state, snapshot(state))` working.
-3. Throw on a `proxyMap` or `proxySet` snapshot, and suggest building a new collection from its entries. A clone would keep methods that close over the source's index.
-4. Recurse if `cur` is a proxy and `v` is plain data of the same kind, an array or not. A snapshot recurses only into the object that it was taken from, which its id tells. The first draft recursed for any object with the same prototype; that wrote one object's data into another where the state holds the same object in two places, as with `selected: items[0]`, and replaced a class instance with plain data.
+1. Skip `v` if `Object.is(cur, v)`, or if `v` is a snapshot and it is the one that `cur` has now. The second test skips unchanged subtrees of an immutable update in O(1). It reads the snapshot cache, so it makes no snapshot and runs no getter.
+2. Skip accessors, also those that a class of the proxy defines. Snapshots of state with getters carry them, and the proxy already has its own. This keeps `applyChanges(state, snapshot(state))` working.
+3. Throw on a `proxyMap` or `proxySet` snapshot that has changed, and suggest building a new collection from its entries. Its methods read its own data, so it can't be merged key by key, and a copy would give its object members a new identity. A collection is told by its `Symbol.toStringTag`, as `isProxyMap` and `isProxySet` tell it, so a snapshot of another iterable object is applied.
+4. Recurse if `cur` is a proxy that is the target's own property, and `v` is plain data of the same kind, an array or not. Plain data doesn't recurse into a `proxyMap` or `proxySet`: it replaces it. A snapshot recurses only into the object that it was taken from, which its id tells. The first draft recursed for any object with the same prototype; that wrote one object's data into another where the state holds the same object in two places, as with `selected: items[0]`, and replaced a class instance with plain data.
 5. Build any other plain object or array by recursion into a fresh object. Input objects are never adopted as proxy targets, so a snapshot nested at any depth never reaches the `set` trap. Example: `[...snap.todos, { title: 'new', tags: snap.template.tags }]`.
-6. Assign any other snapshot as a copy, which keeps its prototype and its accessors, shares `ref` values and drops the brand. It isn't `deepClone`, which runs getters and clones every object.
+6. Assign any other snapshot as a copy, which keeps its prototype and its accessors, shares `ref` values and drops the brand. Its properties are defined, not assigned, so no setter of a class runs. It isn't `deepClone`, which runs getters and clones every object.
 7. Assign everything else as a normal `set` would, so a `Date`, a `ref`, a class instance or a live `proxyMap` stays the caller's object.
 
-Then delete own data properties absent from `next`; accessors are never deleted. An array takes the length of the array in `next`.
+Then delete own data properties absent from `next`; accessors are never deleted. An array takes the length of the array in `next`, and its holes. A key named `__proto__` is ignored, because writing it would set the prototype of an object in the state.
 
-As built in d6: data that refers to itself is merged or copied once. `applyChanges` doesn't restore that two places of the state hold one object, and it keeps the order of the keys that stay; the docs say both. Until d5, a value read from `useSnapshot` is unwrapped with the embedded tracker's `getOriginalObject`, which d5 removes with vanilla's other unwraps.
+As built in d6: the writes are collected while `next` is read, and made at the end. So the collection error leaves the state as it was. An error from a write itself, such as a setter that throws, can still leave earlier writes: `applyChanges` isn't a transaction. Data that refers to itself is merged or copied once. `applyChanges` doesn't restore that two places of the state hold one object, and it keeps the order of the keys that stay; the docs say both. Until d5, a value read from `useSnapshot` is unwrapped with the embedded tracker's `getOriginalObject`, which d5 removes with vanilla's other unwraps.
 
 A tracked snapshot passed as `next` from an event handler records late reads, and so can cause one extra render. The docs recommend `snapshot(state)` there.
 
@@ -599,8 +599,9 @@ Each item becomes a test in the PR it covers.
   - Equal leaves stay quiet.
   - One notification per call.
   - The identity skip works.
-  - Accessors are skipped.
-  - A collection snapshot throws.
+  - Accessors are skipped, also those of a class.
+  - A changed collection snapshot throws, and nothing is written then.
+  - Array holes, a key named `__proto__`, and plain data over a collection.
 - **Collections**: `get`, `has` and `size` agree through a wrapper after later writes, and a value-only `set` leaves `has` readers quiet. A `set` of an equal value and a `clear` of an empty collection don't notify.
 - **Key subscriptions (d2):**
   - A list fires only when a listed key is set or deleted directly, never for a nested write, and calls back with no arguments.
