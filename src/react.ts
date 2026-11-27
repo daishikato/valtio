@@ -82,11 +82,14 @@ const listKeys = (obj: object): Key[] =>
 
 // What an own getter is recorded as. It is never run to be compared.
 const GETTER = Symbol()
+// What a key that isn't an own key is recorded as, apart from one whose
+// value is undefined.
+const NONE = Symbol()
 
 // Live state is read through descriptors, so that no getter of a proxy runs.
 const ownValue = (obj: object, key: Key): unknown => {
   const desc = Reflect.getOwnPropertyDescriptor(obj, key)
-  return desc && ('value' in desc ? desc.value : GETTER)
+  return desc ? ('value' in desc ? desc.value : GETTER) : NONE
 }
 
 const isStale = (node: Node, [kind, key]: Entry): boolean => {
@@ -174,7 +177,7 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
         values.set(key, kid ? kid.p : own)
         record(hook, node!, [VALUE, key])
       }
-      if (own === GETTER || own === undefined) {
+      if (own === GETTER || own === NONE) {
         // A getter runs with the tracked object as `this`, so its reads are
         // recorded too.
         return Reflect.get(s, key, receiver)

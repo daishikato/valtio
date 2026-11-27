@@ -364,6 +364,32 @@ describe('subscriptions', () => {
     expect(screen.getByText('label: after')).toBeInTheDocument()
   })
 
+  it('should show an inherited method shadowed by undefined in a layout effect before paint', () => {
+    class State {
+      label() {
+        return 'before'
+      }
+    }
+    const state = proxy(new State())
+    // A child's layout effect runs before the reader subscribes.
+    const Writer = () => {
+      useLayoutEffect(() => {
+        ;(state as { label?: unknown }).label = undefined
+      }, [])
+      return null
+    }
+    const Reader = () => {
+      const tracked = useSnapshot(state)
+      return (
+        <div>
+          {`label: ${typeof tracked.label}`}
+          <Writer />
+        </div>
+      )
+    }
+    expect(renderBeforePaint(<Reader />)).toBe('label: undefined')
+  })
+
   it('should drop its subscriptions on unmount', () => {
     const state = proxy({ count: 0 })
     let rendered = 0
