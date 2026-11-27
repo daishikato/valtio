@@ -673,6 +673,25 @@ describe('applyChanges with a snapshot', () => {
 })
 
 describe('applyChanges with useSnapshot', () => {
+  it('should leave an unchanged collection in a value read from useSnapshot', () => {
+    const state = proxy({
+      count: 0,
+      map: proxyMap([['a', 1]]),
+      set: proxySet([1]),
+    })
+    let tracked!: typeof state
+    const Component = () => {
+      tracked = useSnapshot(state) as typeof state
+      return null
+    }
+    render(<Component />)
+    const callback = vi.fn()
+    subscribe(state, callback)
+
+    applyChanges(state, tracked)
+    expect(callback).not.toHaveBeenCalled()
+  })
+
   it('should keep a reader of an equal value quiet', async () => {
     const state = proxy({ nested: { count: 0, text: 'a' } })
     const renderFn = vi.fn()

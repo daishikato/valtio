@@ -95,8 +95,19 @@ const ownValue = (obj: object, key: Key): unknown => {
 const isStale = (node: Node, [kind, key]: Entry): boolean => {
   const p = node.p
   switch (kind) {
-    case VALUE:
-      return !Object.is(node.values.get(key!), ownValue(p, key!))
+    case VALUE: {
+      const value = node.values.get(key!)
+      const kid = node.kids.get(key!)
+      return (
+        !Object.is(value, ownValue(p, key!)) ||
+        // A kid stands for the proxy that its snapshot object was taken
+        // from, and a getter can read anything under its object, also an
+        // object that isn't proxied.
+        (kid
+          ? snapshot(kid.p) !== kid.s
+          : value === GETTER && snapshot(p) !== node.s)
+      )
+    }
     case IN:
       return node.ins.get(key!) !== Reflect.has(p, key!)
     case OWN:
@@ -166,8 +177,14 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
         const live = isObject(own) && ownValue(p, key)
         // An object of the snapshot stands for the proxy that is under the
         // key now. If that changed, a check finds it.
+        // A snapshot object has the prototype of the object that it was
+        // taken from, so an object of another kind, such as a Date, isn't
+        // one.
         const kid =
-          isProxyObject(live) && live !== own && !isProxyObject(own)
+          isProxyObject(live) &&
+          live !== own &&
+          !isProxyObject(own) &&
+          Object.getPrototypeOf(live) === Object.getPrototypeOf(own)
             ? getNode(hook, own as object, live as object)
             : undefined
         if (kid) {

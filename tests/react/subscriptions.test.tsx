@@ -293,8 +293,9 @@ describe('subscriptions', () => {
         state.items.push(1)
       })
       expect(screen.getByText('length: 101')).toBeInTheDocument()
-      // one render, which takes one snapshot
-      expect(snapshots).toBe(1)
+      // one render, which takes one snapshot, and its commit, which
+      // compares the snapshot of items, which is cached
+      expect(snapshots).toBe(2)
     } finally {
       unstable_replaceInternalFunction('createSnapshot', () => original)
     }
@@ -388,6 +389,91 @@ describe('subscriptions', () => {
       )
     }
     expect(renderBeforePaint(<Reader />)).toBe('label: undefined')
+  })
+
+  it('should re-render for a late read of an object that was replaced', async () => {
+    const state = proxy({
+      item: {
+        get label() {
+          return 'old'
+        },
+      },
+    })
+    const Child = memo(function Child({
+      tracked,
+    }: {
+      tracked: { item: { label: string } }
+    }) {
+      const [shown, setShown] = useState(false)
+      return (
+        <button onClick={() => setShown(true)}>
+          {shown ? `label: ${tracked.item.label}` : 'hidden'}
+        </button>
+      )
+    })
+    const Parent = () => <Child tracked={useSnapshot(state)} />
+    render(<Parent />)
+    act(() => {
+      state.item = {
+        get label() {
+          return 'new'
+        },
+      }
+    })
+    // the child renders on its own, on the snapshot that its parent took
+    fireEvent.click(screen.getByText('hidden'))
+    await act(() => Promise.resolve())
+    expect(screen.getByText('label: new')).toBeInTheDocument()
+  })
+
+  it('should not wrap an object that is not a snapshot of the proxy now there', () => {
+    const state = proxy<{ at: object }>({ at: new Date(0) })
+    const Component = () => {
+      const tracked = useSnapshot(state)
+      return (
+        <button
+          onClick={() => {
+            // the Date of the old snapshot, where the state has a proxy now
+            expect((tracked.at as Date).getTime()).toBe(0)
+          }}
+        >
+          button
+        </button>
+      )
+    }
+    render(<Component />)
+    act(() => {
+      state.at = { time: 1 }
+    })
+    fireEvent.click(screen.getByText('button'))
+  })
+
+  it("should show a setter that mutates an object in place in a child's layout effect before paint", () => {
+    const state = proxy({
+      date: new Date(0),
+      get timestamp() {
+        return this.date.getTime()
+      },
+      set timestamp(value: number) {
+        this.date.setTime(value)
+      },
+    })
+    const Writer = () => {
+      useLayoutEffect(() => {
+        state.timestamp = 1000
+      }, [])
+      return null
+    }
+    const Reader = () => {
+      const tracked = useSnapshot(state)
+      return (
+        <div>
+          {`time: ${tracked.timestamp}`}
+          <Writer />
+        </div>
+      )
+    }
+    expect(renderBeforePaint(<Reader />)).toBe('time: 1000')
   })
 
   it('should drop its subscriptions on unmount', () => {

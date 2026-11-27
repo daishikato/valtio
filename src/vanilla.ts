@@ -154,6 +154,10 @@ const watchGetter = (get: AnyFunction, key: string | symbol): AnyFunction => {
   let watched = watchedGetters.get(get)
   if (!watched) {
     watched = function (this: unknown) {
+      // A copy of a snapshot can take the getter into state.
+      if (!isObject(this) || !hasOwn(this, snapshotBrand)) {
+        return get.call(this)
+      }
       const prev = runningGetter
       runningGetter = [get, key]
       try {

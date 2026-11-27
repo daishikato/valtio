@@ -67,11 +67,27 @@ const isSnapshotOf = (snap: AnyObject, proxyObject: object): boolean =>
   snap[snapshotBrand] === getObjectId(proxyStateMap.get(proxyObject)![0])
 
 // Whether a snapshot is the one that a proxy has now, which means that
-// nothing changed under the proxy since. It makes no new snapshot.
+// nothing changed under the proxy since. It makes no new snapshot. A value
+// read from useSnapshot wraps the snapshot, so it is compared by its own
+// properties.
 const isCurrentSnapshot = (snap: object, proxyObject: object): boolean => {
   const [target, ensureVersion] = proxyStateMap.get(proxyObject)!
   const cache = snapCache.get(target)
-  return !!cache && cache[1] === snap && cache[0] === ensureVersion()
+  if (!cache || cache[0] !== ensureVersion()) {
+    return false
+  }
+  const current = cache[1] as object
+  const keys = Reflect.ownKeys(current)
+  const nextKeys = Reflect.ownKeys(snap)
+  return (
+    current === snap ||
+    (keys.length === nextKeys.length &&
+      keys.every((key, i) => {
+        const a = Reflect.getOwnPropertyDescriptor(current, key)!
+        const b = Reflect.getOwnPropertyDescriptor(snap, key)
+        return key === nextKeys[i] && a.value === b?.value && a.get === b?.get
+      }))
+  )
 }
 
 // The own enumerable keys, which leaves out the brand of a snapshot and the

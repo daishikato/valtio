@@ -62,7 +62,7 @@ describe('getter results', () => {
         return this.date.getTime()
       },
       set timestamp(value: number) {
-        this.date = new Date(value)
+        this.date.setTime(value)
       },
     })
     const Component = () => {

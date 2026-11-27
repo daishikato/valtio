@@ -329,6 +329,26 @@ describe('snapshot getters', () => {
     consoleWarn.mockRestore()
   })
 
+  it('[DEV-ONLY] should not warn for a getter that a copy of a snapshot takes into state', () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const source = proxy({
+      count: 1,
+      get doubled(): number {
+        return this.count * 2
+      },
+    })
+    const desc = Object.getOwnPropertyDescriptor(snapshot(source), 'doubled')!
+    const destination = proxy(
+      Object.defineProperty({ count: 2 }, 'doubled', desc) as {
+        count: number
+        doubled: number
+      },
+    )
+    expect(destination.doubled).toBe(4)
+    expect(consoleWarn).not.toHaveBeenCalled()
+    consoleWarn.mockRestore()
+  })
+
   it('[DEV-ONLY] should warn when a getter takes a snapshot while it runs on a snapshot', () => {
     const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const other = proxy({ count: 1 })
