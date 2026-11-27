@@ -12,6 +12,7 @@ import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  batch,
   proxy,
   subscribe,
   unstable_replaceInternalFunction,
@@ -297,6 +298,70 @@ describe('subscriptions', () => {
     } finally {
       unstable_replaceInternalFunction('createSnapshot', () => original)
     }
+  })
+
+  it('should not keep a binding that a late read made to another proxy', async () => {
+    const shared = proxy({ count: 0 })
+    const state = proxy({ a: shared, b: shared, show: false })
+    const Component = () => {
+      const tracked = useSnapshot(state)
+      return (
+        <button
+          onClick={() => {
+            // a late read, made after state.a became another proxy
+            void tracked.a.count
+          }}
+        >
+          {tracked.show ? `b: ${tracked.b.count}` : 'hidden'}
+        </button>
+      )
+    }
+    render(<Component />)
+    act(() => {
+      state.a = { count: 0 }
+    })
+    fireEvent.click(screen.getByText('hidden'))
+    await act(() => Promise.resolve())
+
+    act(() => {
+      state.show = true
+    })
+    act(() => {
+      state.b.count = 1
+    })
+    expect(screen.getByText('b: 1')).toBeInTheDocument()
+  })
+
+  it('should re-render when a getter is replaced by a value', () => {
+    const state = proxy<{ value: number }>({
+      get value() {
+        return 1
+      },
+    })
+    const Component = () => <div>value: {useSnapshot(state).value}</div>
+    render(<Component />)
+    act(() => {
+      batch(() => {
+        Reflect.deleteProperty(state, 'value')
+        Object.assign(state, { value: 2 })
+      })
+    })
+    expect(screen.getByText('value: 2')).toBeInTheDocument()
+  })
+
+  it('should re-render when an own property shadows an inherited one', () => {
+    class State {
+      label() {
+        return 'before'
+      }
+    }
+    const state = proxy(new State())
+    const Component = () => <div>label: {useSnapshot(state).label()}</div>
+    render(<Component />)
+    act(() => {
+      state.label = () => 'after'
+    })
+    expect(screen.getByText('label: after')).toBeInTheDocument()
   })
 
   it('should drop its subscriptions on unmount', () => {

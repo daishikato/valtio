@@ -138,7 +138,6 @@ In v2, a snapshot stored the value of each getter of the state. In v3, the snaps
 - **An error from a getter is thrown when it is read**, not by `snapshot()`.
 - **Read the state through `this`.** A getter that reads `state.count` through a closure reads the live state, so a component doesn't re-render for it, and a snapshot doesn't keep its value. In development, such a getter of an object warns once when it runs on a snapshot. A class getter is on the prototype, so it doesn't warn.
 - **Setters are left out of snapshots.** Assigning to a getter of a snapshot throws a `TypeError`. Write to the proxy.
-- **An object that isn't proxied, such as a `Date`, is compared by identity.** A setter that changes one in place, such as `this.date.setTime(value)`, doesn't re-render a component that reads the getter. Assign a new object instead: `this.date = new Date(value)`.
 
 ```js
 const state = proxy({

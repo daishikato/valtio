@@ -192,8 +192,6 @@ A setter called on the proxy runs with the proxy as `this`, so `this.count = new
 
 A snapshot leaves the setter out, so `snap.doubled = 2` is a compile error, and fails at runtime in strict mode.
 
-A setter that changes an object that isn't proxied in place, such as `this.date.setTime(value)`, isn't seen by `useSnapshot`, which compares such an object by identity. Assign a new one instead: `this.date = new Date(value)`.
-
 ## Class getters and setters
 
 Class getters and setters work effectively like object getters and setters:

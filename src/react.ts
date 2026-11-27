@@ -11,7 +11,7 @@ import type { Snapshot } from './vanilla.js'
 type Key = string | symbol
 
 // What a read saw, as an entry in the log of the node it was made on.
-const VALUE = 0 // the value of a key, or the proxy that its object stands for
+const VALUE = 0 // the own property of a key: its value, the proxy that its object stands for, a getter, or none
 const IN = 1 // whether a key is in the node
 const OWN = 2 // whether a key is an own key of the node
 const KEYS = 3 // the list of own keys
@@ -80,10 +80,13 @@ const isHidden = (obj: object, key: Key): boolean =>
 const listKeys = (obj: object): Key[] =>
   Reflect.ownKeys(obj).filter((key) => !isHidden(obj, key))
 
+// What an own getter is recorded as. It is never run to be compared.
+const GETTER = Symbol()
+
 // Live state is read through descriptors, so that no getter of a proxy runs.
 const ownValue = (obj: object, key: Key): unknown => {
   const desc = Reflect.getOwnPropertyDescriptor(obj, key)
-  return desc && 'value' in desc ? desc.value : undefined
+  return desc && ('value' in desc ? desc.value : GETTER)
 }
 
 const isStale = (node: Node, [kind, key]: Entry): boolean => {
@@ -139,7 +142,9 @@ const trackedNodes = new WeakMap<object, [Hook, Node]>()
 
 const getNode = (hook: Hook, s: object, p: object): Node => {
   let node = hook.nodes.get(s)
-  if (node) {
+  // A read from an old tracked object can find its snapshot object under
+  // another proxy, which a check then finds. That binding isn't kept.
+  if (node?.p === p) {
     return node
   }
   const values = new Map<Key, unknown>()
@@ -147,40 +152,35 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
   const owns = new Map<Key, boolean>()
   const t = new Proxy(s, {
     get(s, key, receiver) {
-      const desc = Reflect.getOwnPropertyDescriptor(s, key)
-      if (
-        desc
-          ? !('value' in desc) || isHidden(s, key)
-          : // an inherited key, such as a method or a class getter
-            Reflect.has(s, key)
-      ) {
-        // An accessor runs with the tracked object as `this`, so its reads
-        // are recorded instead. An own one is recorded as there, so that
-        // deleting it is seen.
-        if (desc && !owns.has(key) && !isHidden(s, key)) {
-          owns.set(key, true)
-          record(hook, node!, [OWN, key])
-        }
+      if (isHidden(s, key)) {
         return Reflect.get(s, key, receiver)
       }
-      const value: unknown = desc?.value
+      // The own property is recorded, also for a getter, which is recorded
+      // as one, and for a key that is inherited, such as a method, which is
+      // recorded as none. So replacing a getter or shadowing a method is seen.
+      const own = ownValue(s, key)
       if (!values.has(key)) {
-        const live = isObject(value) && ownValue(p, key)
+        const live = isObject(own) && ownValue(p, key)
         // An object of the snapshot stands for the proxy that is under the
         // key now. If that changed, a check finds it.
         const kid =
-          isProxyObject(live) && live !== value && !isProxyObject(value)
-            ? getNode(hook, value as object, live as object)
+          isProxyObject(live) && live !== own && !isProxyObject(own)
+            ? getNode(hook, own as object, live as object)
             : undefined
         if (kid) {
           kid.reached = true
           node!.kids.set(key, kid)
         }
-        values.set(key, kid ? kid.p : value)
+        values.set(key, kid ? kid.p : own)
         record(hook, node!, [VALUE, key])
       }
+      if (own === GETTER || own === undefined) {
+        // A getter runs with the tracked object as `this`, so its reads are
+        // recorded too.
+        return Reflect.get(s, key, receiver)
+      }
       const kid = node!.kids.get(key)
-      return kid ? kid.t : value
+      return kid ? kid.t : own
     },
     has(s, key) {
       const result = Reflect.has(s, key)

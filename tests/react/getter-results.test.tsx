@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { proxy, ref, snapshot, useSnapshot } from 'valtio'
 
 describe('getter results', () => {
-  it('should not see a setter that mutates an object that is not proxied', async () => {
+  it('should notify a setter that mutates an object that is not proxied', async () => {
     const state = proxy({
       date: new Date(0),
       get timestamp() {
@@ -24,11 +24,12 @@ describe('getter results', () => {
 
     render(<Component />)
     expect(screen.getByText('time: 0')).toBeInTheDocument()
-    // a Date is compared by identity, as an object marked with ref is
+    // the assignment notifies the key of the getter
     await act(async () => {
       state.timestamp = 1000
     })
-    expect(renderFn).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('time: 1000')).toBeInTheDocument()
+    expect(renderFn).toHaveBeenCalledTimes(2)
   })
 
   it('should notify a setter that assigns a new object', async () => {
