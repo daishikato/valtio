@@ -457,7 +457,7 @@ This needs no vanilla API beyond this proposal's, so it can be a follow-up.
 `applyChanges(proxy, next)` in `valtio/utils` merges `next` into an existing proxy, writing only what differs, inside one internal batch. Like `proxyMap`, it uses `batchAsWrite`, so it doesn't throw because of a subscriber unless the caller wraps it in `batch()`.
 
 - `next` can be plain data, a vanilla snapshot, or a React tracked snapshot.
-- The first argument must be a proxy, so `applyChanges(snapshot(state), next)` throws.
+- The first argument must be a proxy, so `applyChanges(snapshot(state), next)` throws. A `proxyMap` or `proxySet` as the first argument throws too: a collection is written with its methods, and it has no keys to merge.
 
 For each own enumerable key of `next`, where `cur = proxy[k]` and `v = next[k]`:
 
@@ -469,7 +469,7 @@ For each own enumerable key of `next`, where `cur = proxy[k]` and `v = next[k]`:
 6. Assign any other snapshot as a copy, which keeps its prototype and its accessors, shares `ref` values and drops the brand. Its properties are defined, not assigned, so no setter of a class runs. It isn't `deepClone`, which runs getters and clones every object.
 7. Assign everything else as a normal `set` would, so a `Date`, a `ref`, a class instance or a live `proxyMap` stays the caller's object.
 
-Then delete own data properties absent from `next`; accessors are never deleted. An array takes the length of the array in `next`, and its holes. A key named `__proto__` is ignored, because writing it would set the prototype of an object in the state.
+Then delete own data properties absent from `next`; accessors are never deleted. An array takes the length of the array in `next`, and its holes. The length is the one case that removes an accessor: an index with a getter beyond the new length goes with the others, which the docs say. A key named `__proto__` is ignored, because writing it would set the prototype of an object in the state.
 
 As built in d6: the writes are collected while `next` is read, and made at the end. So the collection error leaves the state as it was. An error from a write itself, such as a setter that throws, can still leave earlier writes: `applyChanges` isn't a transaction. Data that refers to itself is merged or copied once. `applyChanges` doesn't restore that two places of the state hold one object, and it keeps the order of the keys that stay; the docs say both. Until d5, a value read from `useSnapshot` is unwrapped with the embedded tracker's `getOriginalObject`, which d5 removes with vanilla's other unwraps.
 
