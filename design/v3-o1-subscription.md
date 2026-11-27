@@ -456,7 +456,7 @@ This needs no vanilla API beyond this proposal's, so it can be a follow-up.
 
 `applyChanges(proxy, next)` in `valtio/utils` merges `next` into an existing proxy, writing only what differs, inside one internal batch. Like `proxyMap`, it uses `batchAsWrite`, so it doesn't throw because of a subscriber unless the caller wraps it in `batch()`.
 
-- `next` can be plain data, a vanilla snapshot, or a React tracked snapshot. Plain data from another realm counts: an array is told by `Array.isArray`, and a plain object by a prototype that has none itself.
+- `next` can be plain data, a vanilla snapshot, or a React tracked snapshot. Plain data from another realm counts: the prototype of a plain object has none itself, and the one of a plain array has one that has none. An instance of a class that extends `Array` is a class instance, so it is assigned as it is.
 - The first argument must be a proxy, so `applyChanges(snapshot(state), next)` throws. A `proxyMap` or `proxySet` as the first argument throws too: a collection is written with its methods, and it has no keys to merge. So does an array applied to a proxy of an object, or an object to a proxy of an array: a nested value of the other kind is replaced, but the proxy itself can't be.
 
 For each own enumerable key of `next`, where `cur = proxy[k]` and `v = next[k]`:
