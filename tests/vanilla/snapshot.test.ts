@@ -304,6 +304,18 @@ describe('snapshot getters', () => {
     expect(state.count).toBe(2)
   })
 
+  it('should keep a key with only a setter as an accessor without a getter', () => {
+    const state = proxy({
+      set value(_value: number) {},
+    })
+    const snap = snapshot(state) as { value?: number }
+    const desc = Object.getOwnPropertyDescriptor(snap, 'value')!
+    expect('value' in desc).toBe(false)
+    expect(desc.get).toBeUndefined()
+    expect(desc.set).toBeUndefined()
+    expect(snap.value).toBeUndefined()
+  })
+
   it('[DEV-ONLY] should warn once when a getter reads a proxy while it runs on a snapshot', () => {
     const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const state = proxy({

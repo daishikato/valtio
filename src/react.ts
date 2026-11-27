@@ -294,7 +294,7 @@ const install = (hook: Hook, from: Node[], prune: boolean): boolean => {
     hook.subs.set(p, sub)
     if (!prune) {
       sub.keys.forEach((key) => w.keys.add(key))
-      w.presence.unshift(...sub.presence)
+      w.presence = sub.presence.concat(w.presence)
       w.whole ||= sub.whole
     }
     if (

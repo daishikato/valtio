@@ -106,18 +106,17 @@ const createSnapshotDefault = <T extends object>(
     ) as PropertyDescriptor
     if (!('value' in own)) {
       // A getter is copied, not run, so that each read runs it with the
-      // snapshot that it is read from as `this`. A setter is left out.
-      const desc: PropertyDescriptor = {
+      // snapshot that it is read from as `this`. A setter is left out, and
+      // a key with only a setter stays an accessor, without a getter.
+      Object.defineProperty(snap, key, {
         enumerable: own.enumerable as boolean,
         configurable: true,
-      }
-      if (own.get) {
-        desc.get =
-          process.env.NODE_ENV !== 'production'
+        get:
+          own.get &&
+          (process.env.NODE_ENV !== 'production'
             ? watchGetter(own.get, key)
-            : own.get
-      }
-      Object.defineProperty(snap, key, desc)
+            : own.get),
+      } as PropertyDescriptor)
       return
     }
     const value: unknown = own.value
@@ -143,9 +142,9 @@ const createSnapshotDefault = <T extends object>(
 const hasOwn = (obj: object, key: string | symbol): boolean =>
   Object.prototype.hasOwnProperty.call(obj, key)
 
-// In development, a getter of a snapshot warns once if it reads a proxy
-// while it runs. It can reach a proxy only through a closure, and such a
-// read isn't tracked.
+// In development, a getter of a snapshot warns once if it reads a property
+// of a proxy while it runs. It can reach a proxy only through a closure, and
+// such a read isn't tracked. Other reads of a proxy don't warn.
 let runningGetter: readonly [get: AnyFunction, key: string | symbol] | undefined
 const warnedGetters = new WeakSet<AnyFunction>()
 const watchedGetters = new WeakMap<AnyFunction, AnyFunction>()

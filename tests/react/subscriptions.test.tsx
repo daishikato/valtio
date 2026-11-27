@@ -569,6 +569,59 @@ describe('subscriptions', () => {
     consoleWarn.mockRestore()
   })
 
+  it('should not re-render for a key with only a setter', () => {
+    const state = proxy({
+      count: 0,
+      set value(_value: number) {},
+    })
+    const renders = vi.fn()
+    const Writer = () => {
+      useLayoutEffect(() => {
+        state.count++
+      })
+      return null
+    }
+    const Reader = () => {
+      const tracked = useSnapshot(state) as { value?: number }
+      renders()
+      return (
+        <>
+          <div>{`value: ${String(tracked.value)}`}</div>
+          <Writer />
+        </>
+      )
+    }
+    render(<Reader />)
+    expect(screen.getByText('value: undefined')).toBeInTheDocument()
+    expect(renders).toHaveBeenCalledTimes(1)
+  })
+
+  it('should subscribe a late read after listing the keys of a large object', async () => {
+    const state = proxy<Record<string, number>>(
+      Object.fromEntries(
+        Array.from({ length: 150_000 }, (_, i) => [`k${i}`, i]),
+      ),
+    )
+    const renders = vi.fn()
+    const Component = () => {
+      const tracked = useSnapshot(state)
+      renders()
+      return (
+        <button onClick={() => void tracked.k1}>
+          {`keys: ${Object.keys(tracked).length}`}
+        </button>
+      )
+    }
+    render(<Component />)
+    // a late read, after a descriptor read of each key
+    fireEvent.click(screen.getByText('keys: 150000'))
+    await act(() => Promise.resolve())
+    act(() => {
+      state.k1 = -1
+    })
+    expect(renders).toHaveBeenCalledTimes(2)
+  })
+
   it('should drop its subscriptions on unmount', () => {
     const state = proxy({ count: 0 })
     let rendered = 0
