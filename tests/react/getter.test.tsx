@@ -272,98 +272,32 @@ describe('getter', () => {
     expect(renderFn).toHaveBeenCalledTimes(2)
   })
 
-  it('should compare descriptor values used by getters', async () => {
-    const state = proxy({
-      nested: { count: 1 },
-      get doubled() {
-        const descriptor = Object.getOwnPropertyDescriptor(this.nested, 'count')
-        return (descriptor?.value as number) * 2
+  it('should record only whether a key is there for a descriptor read', async () => {
+    const state = proxy<{ count?: number; readonly hasCount: boolean }>({
+      count: 1,
+      get hasCount() {
+        return !!Object.getOwnPropertyDescriptor(this, 'count')
       },
     })
     const renderFn = vi.fn()
-
     const Component = () => {
       const tracked = useSnapshot(state)
       renderFn()
-      return <div>value: {tracked.doubled}</div>
+      return <div>has count: {String(tracked.hasCount)}</div>
     }
 
     render(<Component />)
-    expect(screen.getByText('value: 2')).toBeInTheDocument()
+    expect(screen.getByText('has count: true')).toBeInTheDocument()
+
+    // the value isn't part of the read
+    state.count = 2
+    await act(() => vi.advanceTimersByTimeAsync(0))
     expect(renderFn).toHaveBeenCalledTimes(1)
 
-    state.nested.count = 2
+    delete state.count
     await act(() => vi.advanceTimersByTimeAsync(0))
-    expect(screen.getByText('value: 4')).toBeInTheDocument()
-    expect(renderFn).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('has count: false')).toBeInTheDocument()
   })
-
-  it('should compare descriptor values used by class getters', async () => {
-    class State {
-      nested = { count: 1 }
-
-      get doubled() {
-        const descriptor = Object.getOwnPropertyDescriptor(this.nested, 'count')
-        return (descriptor?.value as number) * 2
-      }
-    }
-    const state = proxy(new State())
-
-    const Component = () => {
-      const tracked = useSnapshot(state)
-      return <div>value: {tracked.doubled}</div>
-    }
-
-    render(<Component />)
-    expect(screen.getByText('value: 2')).toBeInTheDocument()
-
-    state.nested.count = 2
-    await act(() => vi.advanceTimersByTimeAsync(0))
-    expect(screen.getByText('value: 4')).toBeInTheDocument()
-  })
-
-  it.each(['own', 'inherited'])(
-    'should track nested descriptor reads in %s getters',
-    async (kind) => {
-      const properties = {
-        get doubled() {
-          const descriptor = Object.getOwnPropertyDescriptor(this, 'child')
-          return (descriptor?.value as { count: number }).count * 2
-        },
-      }
-      const state = proxy(
-        kind === 'own'
-          ? Object.defineProperties(
-              { child: { count: 1, other: 0 } },
-              Object.getOwnPropertyDescriptors(properties),
-            )
-          : Object.assign(Object.create(properties), {
-              child: { count: 1, other: 0 },
-            }),
-      ) as { child: { count: number; other: number }; doubled: number }
-      const renderFn = vi.fn()
-      const Component = () => {
-        const tracked = useSnapshot(state)
-        renderFn()
-        return <div>value: {tracked.doubled}</div>
-      }
-
-      render(<Component />)
-      expect(screen.getByText('value: 2')).toBeInTheDocument()
-
-      state.child.other = 1
-      await act(() => vi.advanceTimersByTimeAsync(0))
-      expect(renderFn).toHaveBeenCalledTimes(1)
-
-      state.child.count = 2
-      await act(() => vi.advanceTimersByTimeAsync(0))
-      expect(screen.getByText('value: 4')).toBeInTheDocument()
-
-      state.child = proxy({ count: 3, other: 0 })
-      await act(() => vi.advanceTimersByTimeAsync(0))
-      expect(screen.getByText('value: 6')).toBeInTheDocument()
-    },
-  )
 
   it('should track deletion of a getter', async () => {
     const state = proxy({
@@ -535,7 +469,7 @@ describe('getter', () => {
     expect(screen.getByText('size: 1')).toBeInTheDocument()
   })
 
-  it('simple object getters', async () => {
+  it('should run a getter on each read', async () => {
     const computeDouble = vi.fn((x: number) => x * 2)
     const state = proxy({
       count: 0,
@@ -572,10 +506,12 @@ describe('getter', () => {
     await act(() => vi.advanceTimersByTimeAsync(0))
     expect(screen.getByText('A count: 2')).toBeInTheDocument()
     expect(screen.getByText('B count: 2')).toBeInTheDocument()
-    expect(computeDouble).toBeCalledTimes(1)
+    // two components, each rendered twice by Strict Mode, and nothing caches
+    // the result
+    expect(computeDouble).toBeCalledTimes(4)
   })
 
-  it('object getters returning object', async () => {
+  it('should run a getter that returns an object on each read', async () => {
     const computeDouble = vi.fn((x: number) => x * 2)
     const state = proxy({
       count: 0,
@@ -612,6 +548,8 @@ describe('getter', () => {
     await act(() => vi.advanceTimersByTimeAsync(0))
     expect(screen.getByText('A count: 2')).toBeInTheDocument()
     expect(screen.getByText('B count: 2')).toBeInTheDocument()
-    expect(computeDouble).toBeCalledTimes(1)
+    // two components, each rendered twice by Strict Mode, and nothing caches
+    // the result
+    expect(computeDouble).toBeCalledTimes(4)
   })
 })

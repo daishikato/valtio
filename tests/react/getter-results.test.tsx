@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { proxy, ref, snapshot, useSnapshot } from 'valtio'
 
 describe('getter results', () => {
-  it('should notify direct accessor assignments', async () => {
+  it('should not see a setter that mutates an object that is not proxied', async () => {
     const state = proxy({
       date: new Date(0),
       get timestamp() {
@@ -13,6 +13,32 @@ describe('getter results', () => {
       },
       set timestamp(value: number) {
         this.date.setTime(value)
+      },
+    })
+    const renderFn = vi.fn()
+    const Component = () => {
+      const tracked = useSnapshot(state)
+      renderFn()
+      return <div>time: {tracked.timestamp}</div>
+    }
+
+    render(<Component />)
+    expect(screen.getByText('time: 0')).toBeInTheDocument()
+    // a Date is compared by identity, as an object marked with ref is
+    await act(async () => {
+      state.timestamp = 1000
+    })
+    expect(renderFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('should notify a setter that assigns a new object', async () => {
+    const state = proxy({
+      date: new Date(0),
+      get timestamp() {
+        return this.date.getTime()
+      },
+      set timestamp(value: number) {
+        this.date = new Date(value)
       },
     })
     const Component = () => {
@@ -35,7 +61,7 @@ describe('getter results', () => {
         return this.date.getTime()
       },
       set timestamp(value: number) {
-        this.date.setTime(value)
+        this.date = new Date(value)
       },
     })
     const Component = () => {
@@ -170,11 +196,11 @@ describe('getter results', () => {
     expect(screen.getByText('ref')).toBeInTheDocument()
   })
 
-  it('should retain descendant reads from a getter returning a descriptor value', async () => {
+  it('should retain descendant reads from a getter returning a child', async () => {
     const state = proxy({
       child: { label: 'old' },
       get selected(): { label: string } {
-        return Object.getOwnPropertyDescriptor(this, 'child')!.value
+        return this.child
       },
     })
     const childRender = vi.fn()

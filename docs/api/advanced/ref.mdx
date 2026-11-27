@@ -72,6 +72,14 @@ subscribe(child, () => {
 
 Use `ref(existingProxy)` deliberately, because it affects how that proxy identity participates in later proxy composition.
 
+## `ref` keeps what it is given
+
+A value read from `useSnapshot` is the component's tracking object, not the snapshot, so `ref(tracked.item)` stores that object. To store a snapshot, wrap the one that `snapshot()` returns:
+
+```js
+state.history.push(ref(snapshot(state)))
+```
+
 ## Checking for a `ref`
 
 `unstable_isRef` checks whether an object is marked with `ref`:

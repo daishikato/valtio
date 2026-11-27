@@ -150,28 +150,6 @@ describe('container tracking', () => {
     expect(effect).toHaveBeenCalledTimes(2)
   })
 
-  it('observes getter containers read through descriptors', async () => {
-    const state = proxy({
-      obj: { nested: { count: 1 } },
-      get selected() {
-        return Object.getOwnPropertyDescriptor(this, 'obj')!.value as {
-          nested: { count: number }
-        }
-      },
-    })
-    const effect = vi.fn()
-    const Component = () => {
-      const tracked = useSnapshot(state)
-      useLayoutEffect(effect, [tracked.selected])
-      return null
-    }
-    render(<Component />)
-    await act(async () => {
-      state.obj.nested.count++
-    })
-    expect(effect).toHaveBeenCalledTimes(2)
-  })
-
   it('retains container reads in a memoized descendant', async () => {
     const state = proxy({ obj: { nested: { count: 1 } } })
     const effect = vi.fn()

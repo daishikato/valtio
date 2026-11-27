@@ -1,5 +1,4 @@
 import { unstable_getInternalStates } from '../../vanilla.js'
-import { getOriginalObject, trackAsWhole } from '../proxyCompare.js'
 
 const { proxyStateMap, refSet, snapshotBrand, getObjectId } =
   unstable_getInternalStates()
@@ -22,10 +21,7 @@ export const keyId = (key: unknown): string | symbol => {
     return key === Symbol.iterator ? iteratorId : key
   }
   if ((typeof key === 'object' && key !== null) || typeof key === 'function') {
-    // A value read from useSnapshot is unwrapped. It is first marked as used
-    // as a whole, so that its component re-renders when it is replaced.
-    trackAsWhole(key)
-    const obj = getOriginalObject(key) as Record<symbol, symbol>
+    const obj = key as Record<symbol, symbol>
     return !refSet.has(obj) &&
       Object.prototype.hasOwnProperty.call(obj, snapshotBrand)
       ? (obj[snapshotBrand] as symbol)

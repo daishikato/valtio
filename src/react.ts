@@ -1,43 +1,451 @@
 import {
-  useCallback,
   useDebugValue,
-  useEffect,
   useLayoutEffect,
-  useMemo,
-  useRef,
+  useReducer,
+  useState,
   useSyncExternalStore,
 } from 'react'
-import {
-  affectedToPathList,
-  createProxy as createProxyToCompare,
-  isChanged,
-} from './vanilla/proxyCompare.js'
-import { snapshot, subscribe } from './vanilla.js'
+import { isProxyObject, snapshot, subscribe } from './vanilla.js'
 import type { Snapshot } from './vanilla.js'
 
-/**
- * React hook to display affected paths in React DevTools for debugging
- *
- * This internal hook collects the paths that were accessed during render
- * and displays them in React DevTools to help with debugging render optimizations.
- */
-const useAffectedDebugValue = (
-  state: object,
-  affected: WeakMap<object, unknown>,
-) => {
-  const pathList = useRef<(string | number | symbol)[][]>(undefined)
-  useEffect(() => {
-    pathList.current = affectedToPathList(state, affected)
-  })
-  // TODO should we use useState instead?
-  // eslint-disable-next-line react-hooks/refs
-  useDebugValue(pathList.current)
-}
-const condUseAffectedDebugValue = useAffectedDebugValue
+type Key = string | symbol
 
-// This is required only for performance.
-// Ref: https://github.com/pmndrs/valtio/issues/519
-const targetCache = new WeakMap<object, unknown>()
+// What a read saw, as an entry in the log of the node it was made on.
+const VALUE = 0 // the value of a key, or the proxy that its object stands for
+const IN = 1 // whether a key is in the node
+const OWN = 2 // whether a key is an own key of the node
+const KEYS = 3 // the list of own keys
+const WHOLE = 4 // the whole node, whose snapshot must stay the same
+
+type Entry = readonly [kind: number, key?: Key]
+
+// A snapshot object, and the live proxy that it stands for. The reads made
+// on it are kept for as long as the snapshot object is used, which is as long
+// as nothing under it changes.
+type Node = {
+  s: object // snapshot object
+  p: object // live proxy
+  t: object // tracked object, which a component reads
+  values: Map<Key, unknown>
+  ins: Map<Key, boolean>
+  owns: Map<Key, boolean>
+  keys?: Key[]
+  whole?: boolean
+  kids: Map<Key, Node> // the nodes that its keys gave
+  reached?: boolean // given by a key of another node
+  log: Entry[]
+  at: number // the installation that it was last part of
+  done: number // the entries of its log that were installed then
+}
+
+type Sub = {
+  keys: Set<Key>
+  presence: [Node, Entry][] // the reads of whether keys are there
+  whole: boolean
+  offKeys?: (() => void) | undefined
+  offPresence?: (() => void) | undefined
+  offWhole?: (() => void) | undefined
+}
+
+type Hook = {
+  counter: number
+  notify?: (() => void) | undefined
+  rerender: () => void
+  listener: () => void
+  subscribe: (notify: () => void) => () => void // for useSyncExternalStore
+  nodes: WeakMap<object, Node>
+  root?: Node // of the latest render
+  committed?: Node | undefined // of the latest commit
+  installs: number
+  installed: number // the installation that the subscriptions are of, or -1
+  subs: Map<object, Sub>
+  dirty: Set<Node> // installed nodes that have entries that aren't
+  queued?: boolean
+  stale?: boolean // the counter moved for the reads of the latest render
+}
+
+const isObject = (x: unknown): x is object =>
+  typeof x === 'object' && x !== null
+
+const hasOwn = (obj: object, key: Key): boolean =>
+  Object.prototype.hasOwnProperty.call(obj, key)
+
+// A non-enumerable own symbol, such as the brand of a snapshot, is forwarded
+// without a record.
+const isHidden = (obj: object, key: Key): boolean =>
+  typeof key === 'symbol' &&
+  !Reflect.getOwnPropertyDescriptor(obj, key)?.enumerable &&
+  hasOwn(obj, key)
+
+const listKeys = (obj: object): Key[] =>
+  Reflect.ownKeys(obj).filter((key) => !isHidden(obj, key))
+
+// Live state is read through descriptors, so that no getter of a proxy runs.
+const ownValue = (obj: object, key: Key): unknown => {
+  const desc = Reflect.getOwnPropertyDescriptor(obj, key)
+  return desc && 'value' in desc ? desc.value : undefined
+}
+
+const isStale = (node: Node, [kind, key]: Entry): boolean => {
+  const p = node.p
+  switch (kind) {
+    case VALUE:
+      return !Object.is(node.values.get(key!), ownValue(p, key!))
+    case IN:
+      return node.ins.get(key!) !== Reflect.has(p, key!)
+    case OWN:
+      return node.owns.get(key!) !== hasOwn(p, key!)
+    case KEYS: {
+      const prev = node.keys!
+      const next = listKeys(p)
+      return prev.length !== next.length || prev.some((k, i) => k !== next[i])
+    }
+    default:
+      return snapshot(p) !== node.s
+  }
+}
+
+const bump = (hook: Hook) => {
+  ++hook.counter
+  ;(hook.notify || hook.rerender)()
+}
+
+const record = (hook: Hook, node: Node, entry: Entry) => {
+  node.log.push(entry)
+  // A read on an installed node after its commit is subscribed in a
+  // microtask, which also checks it.
+  if (node.at === hook.installed) {
+    hook.dirty.add(node)
+    if (!hook.queued) {
+      hook.queued = true
+      queueMicrotask(() => {
+        hook.queued = false
+        if (hook.installed !== -1 && install(hook, [...hook.dirty], false)) {
+          bump(hook)
+        }
+      })
+    }
+  }
+}
+
+const recordWhole = (hook: Hook, node: Node) => {
+  if (!node.whole) {
+    node.whole = true
+    record(hook, node, [WHOLE])
+  }
+}
+
+const trackedNodes = new WeakMap<object, [Hook, Node]>()
+
+const getNode = (hook: Hook, s: object, p: object): Node => {
+  let node = hook.nodes.get(s)
+  if (node) {
+    return node
+  }
+  const values = new Map<Key, unknown>()
+  const ins = new Map<Key, boolean>()
+  const owns = new Map<Key, boolean>()
+  const t = new Proxy(s, {
+    get(s, key, receiver) {
+      const desc = Reflect.getOwnPropertyDescriptor(s, key)
+      if (
+        desc
+          ? !('value' in desc) || isHidden(s, key)
+          : // an inherited key, such as a method or a class getter
+            Reflect.has(s, key)
+      ) {
+        // An accessor runs with the tracked object as `this`, so its reads
+        // are recorded instead. An own one is recorded as there, so that
+        // deleting it is seen.
+        if (desc && !owns.has(key) && !isHidden(s, key)) {
+          owns.set(key, true)
+          record(hook, node!, [OWN, key])
+        }
+        return Reflect.get(s, key, receiver)
+      }
+      const value: unknown = desc?.value
+      if (!values.has(key)) {
+        const live = isObject(value) && ownValue(p, key)
+        // An object of the snapshot stands for the proxy that is under the
+        // key now. If that changed, a check finds it.
+        const kid =
+          isProxyObject(live) && live !== value && !isProxyObject(value)
+            ? getNode(hook, value as object, live as object)
+            : undefined
+        if (kid) {
+          kid.reached = true
+          node!.kids.set(key, kid)
+        }
+        values.set(key, kid ? kid.p : value)
+        record(hook, node!, [VALUE, key])
+      }
+      const kid = node!.kids.get(key)
+      return kid ? kid.t : value
+    },
+    has(s, key) {
+      const result = Reflect.has(s, key)
+      if (!ins.has(key) && !isHidden(s, key)) {
+        ins.set(key, result)
+        record(hook, node!, [IN, key])
+      }
+      return result
+    },
+    getOwnPropertyDescriptor(s, key) {
+      const desc = Reflect.getOwnPropertyDescriptor(s, key)
+      if (!owns.has(key) && !isHidden(s, key)) {
+        owns.set(key, !!desc)
+        record(hook, node!, [OWN, key])
+      }
+      return desc
+    },
+    ownKeys(s) {
+      if (!node!.keys) {
+        node!.keys = listKeys(s)
+        record(hook, node!, [KEYS])
+      }
+      return Reflect.ownKeys(s)
+    },
+  })
+  node = {
+    s,
+    p,
+    t,
+    values,
+    ins,
+    owns,
+    kids: new Map(),
+    log: [],
+    at: 0,
+    done: 0,
+  }
+  hook.nodes.set(s, node)
+  trackedNodes.set(t, [hook, node])
+  return node
+}
+
+type Want = { keys: Set<Key>; presence: [Node, Entry][]; whole: boolean }
+
+// Installs the entries of the nodes that `from` reaches, and checks the ones
+// that weren't installed yet. Without `prune`, it only adds subscriptions,
+// for late reads. It returns whether a check failed.
+const install = (hook: Hook, from: Node[], prune: boolean): boolean => {
+  const prev = hook.installed
+  const id = prune ? ++hook.installs : prev
+  const want = new Map<object, Want>()
+  const fresh: [Node, Entry][] = []
+  const seen = new Set<Node>()
+  const visit = (node: Node) => {
+    const installed = node.at === prev
+    if (seen.has(node) || (!prune && installed && !hook.dirty.has(node))) {
+      return
+    }
+    seen.add(node)
+    // A node that is only passed on is used as a whole.
+    if (node.reached && !node.log.length) {
+      node.whole = true
+      node.log.push([WHOLE])
+    }
+    const start = installed ? node.done : 0
+    node.log.forEach((entry, i) => {
+      if (prune || i >= start) {
+        let w = want.get(node.p)
+        if (!w) {
+          want.set(
+            node.p,
+            (w = { keys: new Set(), presence: [], whole: false }),
+          )
+        }
+        if (entry[0] === VALUE) {
+          w.keys.add(entry[1]!)
+        } else if (entry[0] === WHOLE) {
+          w.whole = true
+        } else {
+          w.presence.push([node, entry])
+        }
+      }
+      if (i >= start) {
+        fresh.push([node, entry])
+      }
+    })
+    node.at = id
+    node.done = node.log.length
+    node.kids.forEach(visit)
+  }
+  from.forEach(visit)
+  if (prune) {
+    hook.subs.forEach((sub, p) => {
+      if (!want.has(p)) {
+        sub.offKeys?.()
+        sub.offPresence?.()
+        sub.offWhole?.()
+        hook.subs.delete(p)
+      }
+    })
+  }
+  want.forEach((w, p) => {
+    const sub: Sub = hook.subs.get(p) || {
+      keys: new Set(),
+      presence: [],
+      whole: false,
+    }
+    hook.subs.set(p, sub)
+    if (!prune) {
+      sub.keys.forEach((key) => w.keys.add(key))
+      w.presence.unshift(...sub.presence)
+      w.whole ||= sub.whole
+    }
+    if (
+      w.keys.size !== sub.keys.size ||
+      [...w.keys].some((key) => !sub.keys.has(key))
+    ) {
+      sub.offKeys?.()
+      sub.offKeys = w.keys.size
+        ? subscribe(p, hook.listener, { keys: [...w.keys] })
+        : undefined
+      sub.keys = w.keys
+    }
+    // Whether a key is there changes only with the own keys, which are
+    // compared when they change. So reading it doesn't re-render for a new
+    // value, and Object.keys(), which reads each key's descriptor, doesn't
+    // subscribe to each key.
+    sub.presence = w.presence
+    if (!sub.presence.length !== !sub.offPresence) {
+      sub.offPresence?.()
+      sub.offPresence = sub.presence.length
+        ? subscribe(
+            p,
+            () => {
+              if (sub.presence.some(([node, entry]) => isStale(node, entry))) {
+                bump(hook)
+              }
+            },
+            { ownKeys: true },
+          )
+        : undefined
+    }
+    if (w.whole !== sub.whole) {
+      sub.offWhole?.()
+      sub.offWhole = w.whole ? subscribe(p, hook.listener) : undefined
+      sub.whole = w.whole
+    }
+  })
+  hook.installed = id
+  hook.dirty.clear()
+  return fresh.some(([node, entry]) => isStale(node, entry))
+}
+
+const uninstall = (hook: Hook) => {
+  hook.subs.forEach((sub) => {
+    sub.offKeys?.()
+    sub.offPresence?.()
+    sub.offWhole?.()
+  })
+  hook.subs.clear()
+  hook.dirty.clear()
+  hook.installed = -1
+  hook.committed = undefined
+}
+
+// Checks the reads that aren't installed yet, of a render that hasn't
+// committed, or late reads. It moves the counter if one is stale.
+const checkPending = (hook: Hook) => {
+  if (hook.stale || (hook.root === hook.committed && !hook.dirty.size)) {
+    return
+  }
+  const seen = new Set<Node>()
+  const visit = (node: Node): boolean => {
+    if (seen.has(node)) {
+      return false
+    }
+    seen.add(node)
+    const start = node.at === hook.installed ? node.done : 0
+    if (
+      (node.reached && !node.log.length && snapshot(node.p) !== node.s) ||
+      node.log.some((entry, i) => i >= start && isStale(node, entry))
+    ) {
+      return true
+    }
+    for (const kid of node.kids.values()) {
+      if (visit(kid)) {
+        return true
+      }
+    }
+    return false
+  }
+  if ((hook.root && visit(hook.root)) || [...hook.dirty].some(visit)) {
+    ++hook.counter
+    hook.stale = true
+  }
+}
+
+const createHook = (rerender: () => void): Hook => {
+  const hook: Hook = {
+    counter: 0,
+    rerender,
+    listener: () => bump(hook),
+    subscribe: (notify) => {
+      hook.notify = notify
+      return () => {
+        if (hook.notify === notify) {
+          hook.notify = undefined
+        }
+      }
+    },
+    nodes: new WeakMap(),
+    installs: 0,
+    installed: -1,
+    subs: new Map(),
+    dirty: new Set(),
+  }
+  return hook
+}
+
+// Each render takes the current snapshot, which is the cached one unless
+// something changed. So a key read for the first time has its current value,
+// also in a render that the counter didn't cause.
+const startRender = (hook: Hook, p: object): Node => {
+  const root = getNode(hook, snapshot(p) as object, p)
+  hook.root = root
+  hook.stale = false
+  return root
+}
+
+const commit = (hook: Hook, root: Node) => {
+  hook.committed = root
+  if (install(hook, [root], true)) {
+    bump(hook)
+  }
+}
+
+const listPaths = (root: Node): Key[][] => {
+  const paths: Key[][] = []
+  const seen = new Set<Node>()
+  const walk = (node: Node, path: Key[]) => {
+    if (seen.has(node)) {
+      return
+    }
+    seen.add(node)
+    if (node.whole || node.keys) {
+      paths.push(path)
+    }
+    ;[
+      ...new Set([
+        ...node.values.keys(),
+        ...node.ins.keys(),
+        ...node.owns.keys(),
+      ]),
+    ].forEach((key) => {
+      const kid = node.kids.get(key)
+      if (kid) {
+        walk(kid, [...path, key])
+      } else {
+        paths.push([...path, key])
+      }
+    })
+  }
+  walk(root, [])
+  return paths
+}
 
 /**
  * useSnapshot
@@ -119,59 +527,46 @@ export function useSnapshot<T extends object>(proxyObject: T): Snapshot<T> {
       'useSnapshot() no longer accepts an options argument. Updates are synchronous.',
     )
   }
-  // per-proxy & per-hook affected, it's not ideal but memo compatible
-  const affected = useMemo(
-    () => proxyObject && new WeakMap<object, unknown>(),
-    [proxyObject],
-  )
-  const lastSnapshot = useRef<Snapshot<T>>(undefined)
+  const [, rerender] = useReducer((n: number) => n + 1, 0)
+  const [hook] = useState(() => createHook(rerender))
   let inRender = true
-  const currSnapshot = useSyncExternalStore(
-    useCallback(
-      (callback) => {
-        const unsub = subscribe(proxyObject, callback)
-        callback() // Note: do we really need this?
-        return unsub
-      },
-      [proxyObject],
-    ),
+  useSyncExternalStore(
+    hook.subscribe,
     () => {
-      // TODO: This takes a snapshot on every notification, so a loop of
-      // unbatched writes takes one snapshot per write. Replace it with a
-      // per-hook counter when subscriptions become key-level.
-      const nextSnapshot = snapshot(proxyObject)
-      try {
-        if (
-          !inRender &&
-          lastSnapshot.current &&
-          !isChanged(
-            lastSnapshot.current,
-            nextSnapshot,
-            affected,
-            new WeakMap(),
-          )
-        ) {
-          // not changed
-          return lastSnapshot.current
-        }
-      } catch {
-        // ignore if a promise or something is thrown
+      // React calls this twice during render, and wants the same result.
+      if (!inRender) {
+        checkPending(hook)
       }
-      return nextSnapshot
+      return hook.counter
     },
-    () => snapshot(proxyObject),
+    () => hook.counter,
   )
-  // TODO how could we bypass this?
-  // eslint-disable-next-line react-hooks/immutability
   inRender = false
-  useLayoutEffect(() => {
-    lastSnapshot.current = currSnapshot
-  })
+  const root = startRender(hook, proxyObject)
+  useLayoutEffect(() => commit(hook, root))
+  useLayoutEffect(() => () => uninstall(hook), [hook])
   if (process.env.NODE_ENV !== 'production') {
-    condUseAffectedDebugValue(currSnapshot as object, affected)
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useDebugValue(root, listPaths)
   }
-  const proxyCache = useMemo(() => new WeakMap<object, unknown>(), []) // per-hook proxyCache
-  return createProxyToCompare(currSnapshot, affected, proxyCache, targetCache)
+  return root.t as Snapshot<T>
 }
 
-export { getUntracked, trackMemo } from './vanilla/proxyCompare.js'
+/**
+ * Makes a component depend on the whole of an object that it read from
+ * `useSnapshot`, as well as on the keys that it reads under it.
+ *
+ * Use it where the component depends on the identity of the object, for
+ * example when it passes the object to a memoized function.
+ *
+ * @example
+ * const tracked = useSnapshot(state)
+ * const total = useMemo(() => sum(trackKey(tracked.items)), [tracked.items])
+ */
+export function trackKey<T>(obj: T): T {
+  const found = trackedNodes.get(obj as object)
+  if (found) {
+    recordWhole(...found)
+  }
+  return obj
+}

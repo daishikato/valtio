@@ -243,6 +243,106 @@ describe('snapshot', () => {
   })
 })
 
+describe('snapshot getters', () => {
+  it('should run a getter on each read, with the snapshot as this', () => {
+    const compute = vi.fn((count: number) => count * 2)
+    const state = proxy({
+      count: 1,
+      get doubled() {
+        return compute(this.count)
+      },
+    })
+    const snap = snapshot(state)
+    expect(compute).not.toHaveBeenCalled()
+
+    expect(snap.doubled).toBe(2)
+    expect(snap.doubled).toBe(2)
+    expect(compute).toHaveBeenCalledTimes(2)
+
+    state.count = 2
+    expect(snap.doubled).toBe(2)
+    expect(snapshot(state).doubled).toBe(4)
+  })
+
+  it('should give an object from a getter a new identity on each read', () => {
+    const state = proxy({
+      count: 1,
+      get box() {
+        return { count: this.count }
+      },
+    })
+    const snap = snapshot(state)
+    expect(snap.box).toEqual({ count: 1 })
+    expect(snap.box).not.toBe(snap.box)
+  })
+
+  it('should throw from a getter on read, not from snapshot()', () => {
+    const state = proxy({
+      get failing(): number {
+        throw new Error('failed')
+      },
+    })
+    const snap = snapshot(state)
+    expect(() => snap.failing).toThrow('failed')
+  })
+
+  it('should leave the setter out', () => {
+    const state = proxy({
+      count: 1,
+      get doubled() {
+        return this.count * 2
+      },
+      set doubled(value: number) {
+        this.count = value / 2
+      },
+    })
+    const snap = snapshot(state) as { doubled: number }
+    expect(() => {
+      snap.doubled = 4
+    }).toThrow(TypeError)
+    state.doubled = 4
+    expect(state.count).toBe(2)
+  })
+
+  it('[DEV-ONLY] should warn once when a getter reads a proxy while it runs on a snapshot', () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const state = proxy({
+      count: 1,
+      get closure(): number {
+        return state.count * 2
+      },
+      get viaThis(): number {
+        return this.count * 2
+      },
+    })
+    expect(state.closure).toBe(2)
+    expect(consoleWarn).not.toHaveBeenCalled()
+
+    const snap = snapshot(state)
+    expect(snap.viaThis).toBe(2)
+    expect(consoleWarn).not.toHaveBeenCalled()
+
+    expect(snap.closure).toBe(2)
+    expect(snap.closure).toBe(2)
+    expect(consoleWarn).toHaveBeenCalledTimes(1)
+    expect(consoleWarn.mock.calls[0]![0]).toContain('closure')
+    consoleWarn.mockRestore()
+  })
+
+  it('[DEV-ONLY] should warn when a getter takes a snapshot while it runs on a snapshot', () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const other = proxy({ count: 1 })
+    const state = proxy({
+      get count(): number {
+        return snapshot(other).count
+      },
+    })
+    expect(snapshot(state).count).toBe(1)
+    expect(consoleWarn).toHaveBeenCalledTimes(1)
+    consoleWarn.mockRestore()
+  })
+})
+
 describe('snapshot brand', () => {
   const message =
     'Cannot assign a Valtio snapshot into a proxy. Copy it with deepClone(), merge it with applyChanges(), or wrap it with ref() to store it as is.'

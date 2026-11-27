@@ -1,5 +1,3 @@
-import { getOriginalObject, markToTrack } from './vanilla/proxyCompare.js'
-
 const isObject = (x: unknown): x is object =>
   typeof x === 'object' && x !== null
 
@@ -91,7 +89,6 @@ const createSnapshotDefault = <T extends object>(
     // Holes at the end set no index, so the length is copied first.
     snap.length = target.length
   }
-  markToTrack(snap, true) // mark to track
   // Configurable, so that createProxy doesn't copy the snapshot.
   Object.defineProperty(snap, snapshotBrand, {
     value: getObjectId(target),
@@ -103,21 +100,35 @@ const createSnapshotDefault = <T extends object>(
       // Only the known case is Array.length so far.
       return
     }
-    const value = Reflect.get(target, key)
-    const { enumerable } = Reflect.getOwnPropertyDescriptor(
+    const own = Reflect.getOwnPropertyDescriptor(
       target,
       key,
     ) as PropertyDescriptor
+    if (!('value' in own)) {
+      // A getter is copied, not run, so that each read runs it with the
+      // snapshot that it is read from as `this`. A setter is left out.
+      const desc: PropertyDescriptor = {
+        enumerable: own.enumerable as boolean,
+        configurable: true,
+      }
+      if (own.get) {
+        desc.get =
+          process.env.NODE_ENV !== 'production'
+            ? watchGetter(own.get, key)
+            : own.get
+      }
+      Object.defineProperty(snap, key, desc)
+      return
+    }
+    const value: unknown = own.value
     const desc: PropertyDescriptor = {
       value,
-      enumerable: enumerable as boolean,
+      enumerable: own.enumerable as boolean,
       // This is intentional to avoid copying in createProxy.
       // It's still non-writable, so it avoids assigning a value.
       configurable: true,
     }
-    if (refSet.has(value as object)) {
-      markToTrack(value as object, false) // mark not to track
-    } else if (proxyStateMap.has(value as object)) {
+    if (!refSet.has(value as object) && proxyStateMap.has(value as object)) {
       const [target, ensureVersion] = proxyStateMap.get(
         value as object,
       ) as ProxyState
@@ -132,6 +143,39 @@ const createSnapshotDefault = <T extends object>(
 const hasOwn = (obj: object, key: string | symbol): boolean =>
   Object.prototype.hasOwnProperty.call(obj, key)
 
+// In development, a getter of a snapshot warns once if it reads a proxy or
+// takes a snapshot while it runs. It can reach a proxy only through a
+// closure, and such a read isn't tracked.
+let runningGetter: readonly [get: AnyFunction, key: string | symbol] | undefined
+const warnedGetters = new WeakSet<AnyFunction>()
+const watchedGetters = new WeakMap<AnyFunction, AnyFunction>()
+
+const watchGetter = (get: AnyFunction, key: string | symbol): AnyFunction => {
+  let watched = watchedGetters.get(get)
+  if (!watched) {
+    watched = function (this: unknown) {
+      const prev = runningGetter
+      runningGetter = [get, key]
+      try {
+        return get.call(this)
+      } finally {
+        runningGetter = prev
+      }
+    }
+    watchedGetters.set(get, watched)
+  }
+  return watched
+}
+
+const warnInGetter = () => {
+  if (runningGetter && !warnedGetters.has(runningGetter[0])) {
+    warnedGetters.add(runningGetter[0])
+    console.warn(
+      `The getter ${String(runningGetter[1])} read a proxy while it ran on a snapshot, so the read isn't tracked. Read the state through \`this\`.`,
+    )
+  }
+}
+
 const createHandlerDefault = <T extends object>(
   isInitializing: () => boolean,
   addChildListener: (key: string | symbol, value: unknown) => void,
@@ -139,6 +183,12 @@ const createHandlerDefault = <T extends object>(
   notifyUpdate: (keys: readonly (string | symbol)[]) => void,
   findRemovedIndices: (newLength: number) => readonly string[],
 ): ProxyHandler<T> => ({
+  ...(process.env.NODE_ENV !== 'production' && {
+    get(target: T, key: string | symbol, receiver: object) {
+      warnInGetter()
+      return Reflect.get(target, key, receiver)
+    },
+  }),
   deleteProperty(target: T, key: string | symbol) {
     const hadKey = hasOwn(target, key)
     removeChildListener(key)
@@ -166,9 +216,6 @@ const createHandlerDefault = <T extends object>(
       key === 'length' && length !== false && value >= 0 && value < length
         ? findRemovedIndices(Number(value))
         : []
-    if (isObject(value)) {
-      value = getOriginalObject(value)
-    }
     // proxy() can throw, so the current child stays linked until it passes.
     const nextValue =
       !proxyStateMap.has(value) && canProxy(value) ? proxy(value) : value
@@ -324,8 +371,7 @@ export function proxy<T extends object>(baseObject: T = {} as T): T {
   if (!isObject(baseObject)) {
     throw new Error('object required')
   }
-  // A value read from useSnapshot is unwrapped, so the tracker records nothing.
-  if (hasOwn(getOriginalObject(baseObject), snapshotBrand)) {
+  if (hasOwn(baseObject, snapshotBrand)) {
     throw new Error(
       'Cannot assign a Valtio snapshot into a proxy. Copy it with deepClone(), merge it with applyChanges(), or wrap it with ref() to store it as is.',
     )
@@ -616,6 +662,9 @@ export function snapshot<T extends object>(proxyObject: T): Snapshot<T> {
   if (process.env.NODE_ENV !== 'production' && !proxyState) {
     console.warn('Please use proxy object')
   }
+  if (process.env.NODE_ENV !== 'production') {
+    warnInGetter()
+  }
   const [target, ensureVersion] = proxyState as ProxyState
   return createSnapshot(target, ensureVersion()) as Snapshot<T>
 }
@@ -628,8 +677,6 @@ export function snapshot<T extends object>(proxyObject: T): Snapshot<T> {
  */
 export function ref<T extends object>(obj: T) {
   refSet.add(obj)
-  // The set trap unwraps a value read from useSnapshot, so mark that too.
-  refSet.add(getOriginalObject(obj))
   return obj as T & { $$valtioSnapshot: T }
 }
 

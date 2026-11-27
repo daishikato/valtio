@@ -4,7 +4,6 @@ import {
   unstable_isRef,
 } from '../../vanilla.js'
 import type { Snapshot } from '../../vanilla.js'
-import { getOriginalObject } from '../proxyCompare.js'
 
 const { batchAsWrite, getObjectId, proxyStateMap, snapCache, snapshotBrand } =
   unstable_getInternalStates()
@@ -18,10 +17,6 @@ const hasOwn = (obj: object, key: string | symbol): boolean =>
   Object.prototype.hasOwnProperty.call(obj, key)
 
 const isSnapshot = (x: object): boolean => hasOwn(x, snapshotBrand)
-
-// A value read from useSnapshot is unwrapped, so that reading it here isn't
-// recorded as a use by its component.
-const unwrap = (x: unknown): unknown => (isObject(x) ? getOriginalObject(x) : x)
 
 // Plain objects, arrays and snapshots are data, which is merged or copied.
 // Anything else is a value that an assignment stores as it is: a proxy, an
@@ -122,7 +117,7 @@ const apply = (proxyObject: AnyObject, data: AnyObject): void => {
           key,
           isValue
             ? {
-                value: copy(unwrap(value[key])),
+                value: copy(value[key]),
                 writable: true,
                 enumerable: true,
                 configurable: true,
@@ -174,7 +169,7 @@ const apply = (proxyObject: AnyObject, data: AnyObject): void => {
         // Accessors are never written. The proxy has its own.
         continue
       }
-      const value = unwrap(next[key])
+      const value = next[key]
       const current = target[key]
       if (
         Object.is(current, value) &&
@@ -239,7 +234,7 @@ export function applyChanges<T extends object>(
       'applyChanges() requires a proxy as its first argument, and it cannot be a proxyMap or proxySet.',
     )
   }
-  const data = unwrap(next) as AnyObject
+  const data = next as AnyObject
   // A nested value of the other kind is replaced, but the proxy itself can't
   // be.
   if (Array.isArray(proxyObject) !== Array.isArray(data)) {

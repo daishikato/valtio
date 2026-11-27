@@ -13,7 +13,7 @@ describe('optimization', () => {
     vi.useRealTimers()
   })
 
-  it('should not rerender if the leaf value does not change', async () => {
+  it('should rerender when an object is replaced by an equal one', async () => {
     const state = proxy({ nested: { count: 0 } })
 
     const renderFn = vi.fn()
@@ -46,16 +46,18 @@ describe('optimization', () => {
     expect(screen.getByText('Count: 0')).toBeInTheDocument()
     expect(renderFn).toBeCalledTimes(1)
 
+    // The assignment replaces the object, so the key that was read changes.
+    // applyChanges() writes only what differs instead.
     fireEvent.click(screen.getByText('button-zero'))
 
     await act(() => vi.advanceTimersByTimeAsync(0))
-    expect(renderFn).toBeCalledTimes(1)
+    expect(renderFn).toBeCalledTimes(2)
 
     fireEvent.click(screen.getByText('button-one'))
 
     await act(() => vi.advanceTimersByTimeAsync(0))
     expect(screen.getByText('Count: 1')).toBeInTheDocument()
-    expect(renderFn).toBeCalledTimes(2)
+    expect(renderFn).toBeCalledTimes(3)
   })
 
   it('should throw for a tracked snapshot assigned into state', async () => {
@@ -110,7 +112,7 @@ describe('optimization', () => {
     expect(renderFn).toHaveBeenCalledTimes(2)
   })
 
-  it('should unwrap a tracked class instance before the check', async () => {
+  it('should throw for a tracked class instance', async () => {
     class Item {
       count = 0
     }
@@ -128,15 +130,16 @@ describe('optimization', () => {
     expect(() => proxy(item)).toThrow(
       'Cannot assign a Valtio snapshot into a proxy.',
     )
+    // ref() keeps what it is given
     destination.value = ref(item)
-    expect(destination.value).toBe(snapshot(state).item)
+    expect(destination.value).toBe(item)
 
     state.item.count = 1
     await act(() => vi.advanceTimersByTimeAsync(0))
     expect(renderFn).toHaveBeenCalledTimes(2)
   })
 
-  it('should store a tracked snapshot wrapped with ref', () => {
+  it('should store what ref is given', () => {
     const source = proxy({ nested: { count: 0 } })
     const destination = proxy<{ value?: object }>({})
     let nested!: object
@@ -146,15 +149,21 @@ describe('optimization', () => {
     }
 
     render(<Component />)
-    destination.value = ref(nested)
+    destination.value = ref(snapshot(source).nested)
     expect(destination.value).toBe(snapshot(source).nested)
+    // a value read from useSnapshot is the component's tracked object
+    destination.value = ref(nested)
+    expect(destination.value).toBe(nested)
   })
 
   it('should not track a getter result assigned outside render', async () => {
     const source = proxy({
       items: [{ label: 'a' }],
       get labels() {
-        return this.items.map((item) => ({ label: item.label }))
+        // reads only the length
+        return Array.from({ length: this.items.length }, (_, index) => ({
+          index,
+        }))
       },
     })
     const destination = proxy<{ value?: object }>({})
