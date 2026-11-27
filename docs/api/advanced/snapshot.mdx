@@ -117,7 +117,7 @@ state.count = 2
 console.log(snap.doubled) // 2
 ```
 
-A getter should read the state through `this`. One that reads the proxy through a closure, such as `state.count`, reads the live state, and in development, it warns when it runs on a snapshot. See [Computed Properties](../../guides/computed-properties).
+A getter should read the state through `this`. One that reads the proxy through a closure, such as `state.count`, reads the live state, and in development, a getter of an object warns when it runs on a snapshot. See [Computed Properties](../../guides/computed-properties).
 
 ## Snapshots can't go into state
 
