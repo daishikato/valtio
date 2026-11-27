@@ -77,16 +77,20 @@ const isCurrentSnapshot = (snap: object, proxyObject: object): boolean => {
     return false
   }
   const current = cache[1] as object
+  if (current === snap) {
+    return true
+  }
   const keys = Reflect.ownKeys(current)
   const nextKeys = Reflect.ownKeys(snap)
   return (
-    current === snap ||
-    (keys.length === nextKeys.length &&
-      keys.every((key, i) => {
-        const a = Reflect.getOwnPropertyDescriptor(current, key)!
-        const b = Reflect.getOwnPropertyDescriptor(snap, key)
-        return key === nextKeys[i] && a.value === b?.value && a.get === b?.get
-      }))
+    keys.length === nextKeys.length &&
+    keys.every((key, i) => {
+      const a = Reflect.getOwnPropertyDescriptor(current, key)!
+      const b = Reflect.getOwnPropertyDescriptor(snap, key)
+      return (
+        key === nextKeys[i] && Object.is(a.value, b?.value) && a.get === b?.get
+      )
+    })
   )
 }
 

@@ -5,7 +5,12 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react'
-import { isProxyObject, snapshot, subscribe } from './vanilla.js'
+import {
+  isProxyObject,
+  snapshot,
+  subscribe,
+  unstable_isRef,
+} from './vanilla.js'
 import type { Snapshot } from './vanilla.js'
 
 type Key = string | symbol
@@ -179,11 +184,12 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
         // key now. If that changed, a check finds it.
         // A snapshot object has the prototype of the object that it was
         // taken from, so an object of another kind, such as a Date, isn't
-        // one.
+        // one. Neither is an object marked with ref, which is kept as it is.
         const kid =
           isProxyObject(live) &&
           live !== own &&
           !isProxyObject(own) &&
+          !unstable_isRef(own) &&
           Object.getPrototypeOf(live) === Object.getPrototypeOf(own)
             ? getNode(hook, own as object, live as object)
             : undefined

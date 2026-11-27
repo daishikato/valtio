@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   batch,
   proxy,
+  ref,
   subscribe,
   unstable_replaceInternalFunction,
   useSnapshot,
@@ -427,14 +428,20 @@ describe('subscriptions', () => {
   })
 
   it('should not wrap an object that is not a snapshot of the proxy now there', () => {
-    const state = proxy<{ at: object }>({ at: new Date(0) })
+    const item = ref({ count: 0 })
+    const state = proxy<{ at: object; item: object }>({
+      at: new Date(0),
+      item,
+    })
+    let read: unknown[] = []
     const Component = () => {
       const tracked = useSnapshot(state)
       return (
         <button
           onClick={() => {
-            // the Date of the old snapshot, where the state has a proxy now
-            expect((tracked.at as Date).getTime()).toBe(0)
+            // the Date and the ref of the old snapshot, where the state has
+            // proxies now
+            read = [(tracked.at as Date).getTime(), tracked.item]
           }}
         >
           button
@@ -444,8 +451,11 @@ describe('subscriptions', () => {
     render(<Component />)
     act(() => {
       state.at = { time: 1 }
+      state.item = { count: 1 }
     })
     fireEvent.click(screen.getByText('button'))
+    expect(read[0]).toBe(0)
+    expect(read[1]).toBe(item)
   })
 
   it("should show a setter that mutates an object in place in a child's layout effect before paint", () => {

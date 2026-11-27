@@ -670,6 +670,16 @@ describe('applyChanges with a snapshot', () => {
     expect(state.node!.name).toBe('a')
     expect(state.node!.self).toBe(state.node)
   })
+
+  it('should tell -0 from 0 when it compares a snapshot with the current one', () => {
+    const state = proxy({ n: -0 })
+    const saved = snapshot(state)
+    state.n = 0
+    snapshot(state)
+
+    applyChanges(state, saved)
+    expect(Object.is(state.n, -0)).toBe(true)
+  })
 })
 
 describe('applyChanges with useSnapshot', () => {
@@ -690,6 +700,14 @@ describe('applyChanges with useSnapshot', () => {
 
     applyChanges(state, tracked)
     expect(callback).not.toHaveBeenCalled()
+
+    // a change at the root makes it compare the collections
+    const { map, set } = state
+    state.count = 1
+    applyChanges(state, tracked)
+    expect(state.count).toBe(0)
+    expect(state.map).toBe(map)
+    expect(state.set).toBe(set)
   })
 
   it('should keep a reader of an equal value quiet', async () => {
