@@ -174,7 +174,7 @@ const warnInGetter = () => {
   if (runningGetter && !warnedGetters.has(runningGetter[0])) {
     warnedGetters.add(runningGetter[0])
     console.warn(
-      `The getter ${String(runningGetter[1])} read a proxy while it ran on a snapshot, so the read isn't tracked. Read the state through \`this\`.`,
+      `The getter ${String(runningGetter[1])} read a proxy while it ran on a snapshot, so the read isn't tracked. Read the state through \`this\`, not through a closure or an object marked with \`ref\`.`,
     )
   }
 }

@@ -88,7 +88,10 @@ const isCurrentSnapshot = (snap: object, proxyObject: object): boolean => {
       const a = Reflect.getOwnPropertyDescriptor(current, key)!
       const b = Reflect.getOwnPropertyDescriptor(snap, key)
       return (
-        key === nextKeys[i] && Object.is(a.value, b?.value) && a.get === b?.get
+        key === nextKeys[i] &&
+        Object.is(a.value, b?.value) &&
+        a.get === b?.get &&
+        a.enumerable === b?.enumerable
       )
     })
   )

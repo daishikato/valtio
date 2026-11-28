@@ -341,6 +341,21 @@ describe('snapshot getters', () => {
     consoleWarn.mockRestore()
   })
 
+  it('[DEV-ONLY] should name ref when a getter reads a proxy marked with ref through this', () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const state = proxy({
+      child: ref(proxy({ count: 1 })),
+      get count() {
+        return this.child.count
+      },
+    })
+    expect(snapshot(state).count).toBe(1)
+    const messages = consoleWarn.mock.calls.map(([message]) => message)
+    consoleWarn.mockRestore()
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toContain('an object marked with `ref`')
+  })
+
   it('[DEV-ONLY] should not warn for a getter that a copy of a snapshot takes into state', () => {
     const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const source = proxy({

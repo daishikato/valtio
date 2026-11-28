@@ -680,6 +680,24 @@ describe('applyChanges with a snapshot', () => {
     applyChanges(state, saved)
     expect(Object.is(state.n, -0)).toBe(true)
   })
+
+  it('should tell an enumerable key from a non-enumerable one when it compares a snapshot with the current one', () => {
+    const state = proxy(
+      Object.defineProperty({ x: 1 }, 'hidden', {
+        value: 2,
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      }) as { x: number; hidden?: number },
+    )
+    const saved = snapshot(state)
+    delete state.hidden
+    state.hidden = 2
+    snapshot(state)
+
+    applyChanges(state, saved)
+    expect(Object.hasOwn(state, 'hidden')).toBe(false)
+  })
 })
 
 describe('applyChanges with useSnapshot', () => {
