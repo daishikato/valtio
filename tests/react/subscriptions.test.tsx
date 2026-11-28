@@ -345,6 +345,38 @@ describe('subscriptions', () => {
     expect(screen.getByText('count: 1')).toBeInTheDocument()
   })
 
+  it('should re-render for a late read of a non-enumerable symbol key that was deleted', async () => {
+    const COUNT = Symbol('count')
+    const state = proxy(
+      Object.defineProperty({}, COUNT, {
+        value: 0,
+        writable: true,
+        configurable: true,
+      }) as { [COUNT]?: number },
+    )
+    const Child = memo(function Child({
+      tracked,
+    }: {
+      tracked: { [COUNT]?: number }
+    }) {
+      const [shown, setShown] = useState(false)
+      return (
+        <button onClick={() => setShown(true)}>
+          {shown ? `count: ${String(tracked[COUNT])}` : 'hidden'}
+        </button>
+      )
+    })
+    const Parent = () => <Child tracked={useSnapshot(state)} />
+    render(<Parent />)
+    act(() => {
+      delete state[COUNT]
+    })
+    // the child renders on its own, on the snapshot that its parent took
+    fireEvent.click(screen.getByText('hidden'))
+    await act(() => Promise.resolve())
+    expect(screen.getByText('count: undefined')).toBeInTheDocument()
+  })
+
   it('should not keep a binding that a late read made to another proxy', async () => {
     const shared = proxy({ count: 0 })
     const state = proxy({ a: shared, b: shared, show: false })

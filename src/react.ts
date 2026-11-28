@@ -70,13 +70,10 @@ const isObject = (x: unknown): x is object =>
 const hasOwn = (obj: object, key: Key): boolean =>
   Object.prototype.hasOwnProperty.call(obj, key)
 
-// The brand of a snapshot is forwarded without a record. It is the
-// non-enumerable own symbol that a snapshot has and its proxy doesn't.
-const isBrand = (s: object, p: object, key: Key): boolean =>
-  typeof key === 'symbol' &&
-  !hasOwn(p, key) &&
-  hasOwn(s, key) &&
-  !Reflect.getOwnPropertyDescriptor(s, key)!.enumerable
+// The brand of a snapshot is forwarded without a record. A snapshot that
+// was just taken has no other own symbol that its proxy doesn't have, so the
+// first render finds it there.
+let brand: Key | undefined
 
 // What an own getter is recorded as. It is never run to be compared.
 const GETTER = Symbol()
@@ -151,7 +148,7 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
   const owns = new Map<Key, boolean>()
   const t = new Proxy(s, {
     get(s, key, receiver) {
-      if (isBrand(s, p, key)) {
+      if (key === brand) {
         return Reflect.get(s, key, receiver)
       }
       // The own property is recorded, also for a getter, which is recorded
@@ -187,7 +184,7 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
     },
     has(s, key) {
       const result = Reflect.has(s, key)
-      if (!ins.has(key) && !isBrand(s, p, key)) {
+      if (!ins.has(key) && key !== brand) {
         ins.set(key, result)
         record(hook, node!, [IN, key])
       }
@@ -195,7 +192,7 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
     },
     getOwnPropertyDescriptor(s, key) {
       const desc = Reflect.getOwnPropertyDescriptor(s, key)
-      if (!owns.has(key) && !isBrand(s, p, key)) {
+      if (!owns.has(key) && key !== brand) {
         owns.set(key, !!desc)
         record(hook, node!, [OWN, key])
       }
@@ -203,7 +200,7 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
     },
     ownKeys(s) {
       if (!node!.keys) {
-        node!.keys = Reflect.ownKeys(s).filter((key) => !isBrand(s, p, key))
+        node!.keys = Reflect.ownKeys(s).filter((key) => key !== brand)
         record(hook, node!, [KEYS])
       }
       return Reflect.ownKeys(s)
@@ -404,7 +401,9 @@ const createHook = (rerender: () => void): Hook => {
 // something changed. So a key read for the first time has its current value,
 // also in a render that the counter didn't cause.
 const startRender = (hook: Hook, p: object): Node => {
-  const root = getNode(hook, snapshot(p) as object, p)
+  const s = snapshot(p) as object
+  brand ??= Object.getOwnPropertySymbols(s).find((key) => !hasOwn(p, key))
+  const root = getNode(hook, s, p)
   hook.root = root
   hook.stale = false
   return root
