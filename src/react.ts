@@ -70,15 +70,13 @@ const isObject = (x: unknown): x is object =>
 const hasOwn = (obj: object, key: Key): boolean =>
   Object.prototype.hasOwnProperty.call(obj, key)
 
-// A non-enumerable own symbol, such as the brand of a snapshot, is forwarded
-// without a record.
-const isHidden = (obj: object, key: Key): boolean =>
+// The brand of a snapshot is forwarded without a record. It is the
+// non-enumerable own symbol that a snapshot has and its proxy doesn't.
+const isBrand = (s: object, p: object, key: Key): boolean =>
   typeof key === 'symbol' &&
-  !Reflect.getOwnPropertyDescriptor(obj, key)?.enumerable &&
-  hasOwn(obj, key)
-
-const listKeys = (obj: object): Key[] =>
-  Reflect.ownKeys(obj).filter((key) => !isHidden(obj, key))
+  !hasOwn(p, key) &&
+  hasOwn(s, key) &&
+  !Reflect.getOwnPropertyDescriptor(s, key)!.enumerable
 
 // What an own getter is recorded as. It is never run to be compared.
 const GETTER = Symbol()
@@ -103,7 +101,7 @@ const isStale = (node: Node, [kind, key]: Entry): boolean => {
       return node.owns.get(key!) !== hasOwn(p, key!)
     case KEYS: {
       const prev = node.keys!
-      const next = listKeys(p)
+      const next = Reflect.ownKeys(p)
       return prev.length !== next.length || prev.some((k, i) => k !== next[i])
     }
     default:
@@ -153,7 +151,7 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
   const owns = new Map<Key, boolean>()
   const t = new Proxy(s, {
     get(s, key, receiver) {
-      if (isHidden(s, key)) {
+      if (isBrand(s, p, key)) {
         return Reflect.get(s, key, receiver)
       }
       // The own property is recorded, also for a getter, which is recorded
@@ -167,7 +165,9 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
         // with ref, or the snapshot of a proxy that changed since, is
         // returned as it is, and the read is stale.
         const kid =
-          isProxyObject(live) && snapshot(live as object) === own
+          own !== live &&
+          isProxyObject(live) &&
+          snapshot(live as object) === own
             ? getNode(hook, own as object, live as object)
             : undefined
         if (kid) {
@@ -187,7 +187,7 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
     },
     has(s, key) {
       const result = Reflect.has(s, key)
-      if (!ins.has(key) && !isHidden(s, key)) {
+      if (!ins.has(key) && !isBrand(s, p, key)) {
         ins.set(key, result)
         record(hook, node!, [IN, key])
       }
@@ -195,7 +195,7 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
     },
     getOwnPropertyDescriptor(s, key) {
       const desc = Reflect.getOwnPropertyDescriptor(s, key)
-      if (!owns.has(key) && !isHidden(s, key)) {
+      if (!owns.has(key) && !isBrand(s, p, key)) {
         owns.set(key, !!desc)
         record(hook, node!, [OWN, key])
       }
@@ -203,7 +203,7 @@ const getNode = (hook: Hook, s: object, p: object): Node => {
     },
     ownKeys(s) {
       if (!node!.keys) {
-        node!.keys = listKeys(s)
+        node!.keys = Reflect.ownKeys(s).filter((key) => !isBrand(s, p, key))
         record(hook, node!, [KEYS])
       }
       return Reflect.ownKeys(s)
@@ -248,28 +248,25 @@ const install = (hook: Hook, from: Node[], prune: boolean): boolean => {
       node.whole = true
       node.log.push([WHOLE])
     }
+    // Without prune, only the entries that aren't installed yet are added.
     const start = installed ? node.done : 0
-    node.log.forEach((entry, i) => {
-      if (prune || i >= start) {
-        let w = want.get(node.p)
-        if (!w) {
-          want.set(
-            node.p,
-            (w = { keys: new Set(), presence: [], whole: false }),
-          )
-        }
-        if (entry[0] === VALUE) {
-          w.keys.add(entry[1]!)
-        } else if (entry[0] === WHOLE) {
-          w.whole = true
-        } else {
-          w.presence.push([node, entry])
-        }
+    for (let i = prune ? 0 : start; i < node.log.length; i++) {
+      const entry = node.log[i]!
+      let w = want.get(node.p)
+      if (!w) {
+        want.set(node.p, (w = { keys: new Set(), presence: [], whole: false }))
+      }
+      if (entry[0] === VALUE) {
+        w.keys.add(entry[1]!)
+      } else if (entry[0] === WHOLE) {
+        w.whole = true
+      } else {
+        w.presence.push([node, entry])
       }
       if (i >= start) {
         fresh.push([node, entry])
       }
-    })
+    }
     node.at = id
     node.done = node.log.length
     node.kids.forEach(visit)

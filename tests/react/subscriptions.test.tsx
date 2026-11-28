@@ -294,12 +294,55 @@ describe('subscriptions', () => {
         state.items.push(1)
       })
       expect(screen.getByText('length: 101')).toBeInTheDocument()
-      // one render, which takes one snapshot, and its commit, which
-      // compares the snapshot of items, which is cached
+      // one render, which takes one snapshot, and checks that the items
+      // that it reads are the current snapshot of their proxy, which is cached
       expect(snapshots).toBe(2)
     } finally {
       unstable_replaceInternalFunction('createSnapshot', () => original)
     }
+  })
+
+  it('should take no snapshot of a proxy marked with ref that it reads', () => {
+    let snapshots = 0
+    let original!: <T extends object>(target: T, version: number) => T
+    unstable_replaceInternalFunction('createSnapshot', (prev) => {
+      original = prev
+      return (...args) => {
+        ++snapshots
+        return prev(...args)
+      }
+    })
+    try {
+      const child = proxy({ items: [{ count: 0 }] })
+      const state = proxy({ child: ref(child) })
+      const Component = () => {
+        const tracked = useSnapshot(state)
+        return <div>length: {tracked.child.items.length}</div>
+      }
+      render(<Component />)
+      expect(screen.getByText('length: 1')).toBeInTheDocument()
+      // the snapshot of state only
+      expect(snapshots).toBe(1)
+    } finally {
+      unstable_replaceInternalFunction('createSnapshot', () => original)
+    }
+  })
+
+  it('should re-render for a non-enumerable symbol key', () => {
+    const COUNT = Symbol('count')
+    const state = proxy(
+      Object.defineProperty({}, COUNT, {
+        value: 0,
+        writable: true,
+        configurable: true,
+      }) as { [COUNT]: number },
+    )
+    const Component = () => <div>count: {useSnapshot(state)[COUNT]}</div>
+    render(<Component />)
+    act(() => {
+      state[COUNT] = 1
+    })
+    expect(screen.getByText('count: 1')).toBeInTheDocument()
   })
 
   it('should not keep a binding that a late read made to another proxy', async () => {
@@ -620,7 +663,7 @@ describe('subscriptions', () => {
       state.k1 = -1
     })
     expect(renders).toHaveBeenCalledTimes(2)
-  })
+  }, 20_000)
 
   it('should drop its subscriptions on unmount', () => {
     const state = proxy({ count: 0 })

@@ -126,6 +126,8 @@ Most components behave as before. These cases differ:
 - **A key read in an event handler subscribes until the next change.** Reading `tracked.count` in a callback adds `count` to what the component re-renders for, so it can re-render once more than in v2. Read the proxy in callbacks, as the docs recommend.
 - **A descriptor read records whether the key is there, not its value.** `Object.getOwnPropertyDescriptor(tracked, 'count')` re-renders when `count` is added or deleted, not when its value changes. Read the value as `tracked.count`.
 - **`ref` keeps what it is given.** A value read from `useSnapshot` is the component's tracking object, so `ref(tracked.item)` stores that object. Wrap `snapshot(state).item` instead.
+- **Reads are kept until the object changes.** A render that only passes on an object, such as `tracked.item` as an effect dependency, uses it as a whole only if no earlier render read under it since it last changed. In v2, each render counted on its own. Call `trackKey(tracked.item)` when its identity matters.
+- **A frozen snapshot can't be read.** `useSnapshot` wraps the objects of a snapshot, which a frozen object doesn't allow, so a read throws a `TypeError`. In v2, the tracker copied a frozen object. Don't freeze snapshots.
 
 An object that a component passes on without reading under it, such as an effect dependency, a prop or a `proxySet` member, re-renders the component when anything under it changes, as in v2.
 
