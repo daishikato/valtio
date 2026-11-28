@@ -184,19 +184,23 @@ const { profile } = useSnapshot(state)
 return <div>{profile.name}</div>
 ```
 
+## What a component re-renders for
+
+A component re-renders when something that it read from the tracked snapshot changes. It subscribes to each key that it reads, so a change elsewhere in the state doesn't wake it.
+
+- **A value**, such as `tracked.count`: when the key is set to another value, or deleted. A write re-renders also when a later write sets the value back before the render, such as in one `batch`.
+- **A key's presence**, such as `'count' in tracked`, or the list of keys, such as `Object.keys(tracked)`: when a key is added or deleted.
+- **An object that the component only passes on**, such as an effect dependency or a prop, without reading under it: when anything under it changes. Reads are kept with an object of the snapshot until something under it changes, so an object that an earlier render read under still counts as read under. Call `trackKey(tracked.obj)` from `valtio/react` for an object whose identity matters.
+- **A getter**: when something that it reads through `this` changes. The getter runs on each read.
+- **Nothing**: a component that reads nothing doesn't re-render for the state.
+
+A read made after rendering, such as in an event handler, also subscribes, until the next change. So does a read in a render that doesn't commit, such as one that suspends. Read the proxy in callbacks.
+
+Don't freeze a snapshot that `useSnapshot` reads. It wraps the objects of the snapshot to see what a component reads, which a frozen object doesn't allow, so a read throws a `TypeError`.
+
 ## Dev Mode Debug Values
 
-In dev mode, `useSnapshot` uses React's `useDebugValue` to output a list of fields that were accessed during rendering, i.e. which specific fields will trigger re-render when the tracking proxy changes.
-
-<br />
-
-<blockquote className="important">
-!! &nbsp; There are two disclaimers to using the debug value
-
-1. Due to the way `useSnapshot` uses a proxy to recorded accesses _after_ `useSnapshot` has returned, the fields listed in `useDebugValue` are technically from the _previous_ render.
-2. Object getter and class getter calls are not included in the `useDebugValue` output, but don't worry, they are actually correctly tracked internally and correctly trigger re-renders when changed.
-
-</blockquote>
+In dev mode, `useSnapshot` uses React's `useDebugValue` to output the list of fields that were read from the current snapshot, i.e. which specific fields will trigger re-render when they change. Reads made by getters are listed under the fields that they read.
 
 <br />
 

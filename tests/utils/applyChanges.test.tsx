@@ -670,9 +670,64 @@ describe('applyChanges with a snapshot', () => {
     expect(state.node!.name).toBe('a')
     expect(state.node!.self).toBe(state.node)
   })
+
+  it('should tell -0 from 0 when it compares a snapshot with the current one', () => {
+    const state = proxy({ n: -0 })
+    const saved = snapshot(state)
+    state.n = 0
+    snapshot(state)
+
+    applyChanges(state, saved)
+    expect(Object.is(state.n, -0)).toBe(true)
+  })
+
+  it('should tell an enumerable key from a non-enumerable one when it compares a snapshot with the current one', () => {
+    const state = proxy(
+      Object.defineProperty({ x: 1 }, 'hidden', {
+        value: 2,
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      }) as { x: number; hidden?: number },
+    )
+    const saved = snapshot(state)
+    delete state.hidden
+    state.hidden = 2
+    snapshot(state)
+
+    applyChanges(state, saved)
+    expect(Object.hasOwn(state, 'hidden')).toBe(false)
+  })
 })
 
 describe('applyChanges with useSnapshot', () => {
+  it('should leave an unchanged collection in a value read from useSnapshot', () => {
+    const state = proxy({
+      count: 0,
+      map: proxyMap([['a', 1]]),
+      set: proxySet([1]),
+    })
+    let tracked!: typeof state
+    const Component = () => {
+      tracked = useSnapshot(state) as typeof state
+      return null
+    }
+    render(<Component />)
+    const callback = vi.fn()
+    subscribe(state, callback)
+
+    applyChanges(state, tracked)
+    expect(callback).not.toHaveBeenCalled()
+
+    // a change at the root makes it compare the collections
+    const { map, set } = state
+    state.count = 1
+    applyChanges(state, tracked)
+    expect(state.count).toBe(0)
+    expect(state.map).toBe(map)
+    expect(state.set).toBe(set)
+  })
+
   it('should keep a reader of an equal value quiet', async () => {
     const state = proxy({ nested: { count: 0, text: 'a' } })
     const renderFn = vi.fn()

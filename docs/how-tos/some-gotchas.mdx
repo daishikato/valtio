@@ -4,7 +4,7 @@ title: 'Some gotchas'
 
 # Some gotchas
 
-## `useSnapshot(state)` without property access will always trigger re-render
+## Property access decides what re-renders
 
 Ref: https://github.com/pmndrs/valtio/issues/209#issuecomment-896859395
 
@@ -37,16 +37,17 @@ tracked.obj
 
 then, it will re-render if `obj` changes. This includes `count` changes and `text` changes.
 
-Now, we can subscribe to the portion of the state.
+In summary, if a nested snapshot object is used without accessing any of its properties, the entire object counts as used, so any change inside it will trigger re-render.
+
+The snapshot that `useSnapshot` returns is the exception. If nothing is read from it, the component doesn't re-render for the state.
 
 ```js
+// doesn't re-render when state.obj changes
 const tracked = useSnapshot(state.obj)
 tracked
 ```
 
-This is technically same as the previous one. It doesn't touch the property of `tracked`, so it will re-render if `obj` changes.
-
-In summary, if a snapshot object (nested or not) is not accessed with any properties, it assumes the entire object is accessed, so any change inside the object will trigger re-render.
+To depend on the whole of an object that you also read from, call `trackKey(tracked.obj)` from `valtio/react`.
 
 ## Using `React.memo` with object props may result in unexpected behavior (v1 only)
 

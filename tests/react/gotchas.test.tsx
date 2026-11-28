@@ -58,7 +58,7 @@ describe('gotchas: property access decides the re-render scope', () => {
     expect(renderFn).toBeCalledTimes(3)
   })
 
-  it('should behave the same when snapshotting the inner proxy without property access', async () => {
+  it('should not re-render when nothing is read', async () => {
     const state = proxy({ obj: { count: 0, text: 'hello' } })
 
     const renderFn = vi.fn()
@@ -71,9 +71,10 @@ describe('gotchas: property access decides the re-render scope', () => {
     render(<Component />)
     expect(renderFn).toBeCalledTimes(1)
 
+    // a render that reads nothing subscribes to nothing
     state.obj.text = 'world'
     await act(() => vi.advanceTimersByTimeAsync(0))
-    expect(renderFn).toBeCalledTimes(2)
+    expect(renderFn).toBeCalledTimes(1)
   })
 })
 

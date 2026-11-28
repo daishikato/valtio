@@ -9,7 +9,7 @@ description: 'Create a snapshot of current state'
 
 `snapshot` takes a proxy and returns an immutable object, unwrapped from the proxy.
 
-Immutability is achieved by _efficiently_ deep copying & freezing the object (see the [Copy on Write](#copy-on-write) section for details).
+Immutability is achieved by _efficiently_ deep copying the object into read-only properties (see the [Copy on Write](#copy-on-write) section for details).
 
 Briefly, in sequential `snapshot` calls, when the values in the proxy have not changed, the previous snapshot's object reference is returned. This allows for shallow comparison in render functions, preventing spurious renders.
 
@@ -100,6 +100,24 @@ console.log(snap.fullName()) // 'f l'
 Note that the results of getters and methods are not cached, and are re-evaluated on every call.
 
 This should be fine, because the expectation is that they execute very quickly (faster than the overhead of caching them would be worth) and are also deterministic, so the return value is based only on the already-frozen snapshot state.
+
+## Getters
+
+A getter of an object in the state is copied to its snapshot as a getter, as a class getter is on the prototype. Each read runs it with the snapshot as `this`, so it reads the snapshot's values. A setter is left out of the snapshot.
+
+```js
+const state = proxy({
+  count: 1,
+  get doubled() {
+    return this.count * 2
+  },
+})
+const snap = snapshot(state)
+state.count = 2
+console.log(snap.doubled) // 2
+```
+
+A getter should read the state through `this`. One that reads the proxy through a closure, such as `state.count`, reads the live state, and in development, a getter of an object that reads a property of the proxy warns when it runs on a snapshot. See [Computed Properties](../../guides/computed-properties).
 
 ## Snapshots can't go into state
 

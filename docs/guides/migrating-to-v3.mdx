@@ -99,17 +99,64 @@ A v2 function passed unchanged returns a `WeakSet`, which is truthy, so every ob
 
 ## `proxy-compare` is no longer a dependency
 
-`useSnapshot` uses its own copy of proxy-compare. Functions from the `proxy-compare` package don't work on the objects `useSnapshot` returns, so import `getUntracked` and `trackMemo` from `valtio/react` instead. Other functions from `proxy-compare`, such as `markToTrack`, no longer affect `useSnapshot`.
+`useSnapshot` tracks reads with its own code. Functions from the `proxy-compare` package, such as `getUntracked`, `trackMemo` and `markToTrack`, no longer work with the objects that `useSnapshot` returns.
+
+- Instead of `trackMemo(tracked.obj)`, call `trackKey(tracked.obj)` from `valtio/react`. The component then re-renders for any change under `tracked.obj`.
+- Instead of `getUntracked(tracked)`, read the proxy, or take `snapshot(state)`.
 
 ```js
 // v2
-import { getUntracked, trackMemo } from 'proxy-compare'
+import { trackMemo } from 'proxy-compare'
+trackMemo(tracked.obj)
 
 // v3
-import { getUntracked, trackMemo } from 'valtio/react'
+import { trackKey } from 'valtio/react'
+trackKey(tracked.obj)
 ```
 
-proxy-memoize uses the `proxy-compare` package, so if a component depends on the identity of an object from the snapshot that a memoized function returns, directly or inside a new object, call `trackMemo` on that object, such as `trackMemo(result.child)`.
+proxy-memoize uses the `proxy-compare` package, so if a component depends on the identity of an object from the snapshot that a memoized function returns, directly or inside a new object, call `trackKey` on that object, such as `trackKey(result.child)`.
+
+## `useSnapshot` subscribes to what a component reads
+
+A component re-renders when a value that it read from `useSnapshot` changes, as in v2. v3 subscribes to each key that the component read, so a change elsewhere in the state doesn't wake it.
+Most components behave as before. These cases differ:
+
+- **A component that reads nothing doesn't re-render.** In v2, it re-rendered on every change to the state.
+- **Replacing an object with an equal one re-renders.** After `state.user = { name: 'Ann' }`, a component that read `tracked.user.name` re-renders, even if the name is the same. In v2, it compared the values that it read. To write only what differs, use [`applyChanges`](../api/utils/applyChanges).
+- **A key read in an event handler subscribes until the next change.** Reading `tracked.count` in a callback adds `count` to what the component re-renders for, so it can re-render once more than in v2. So does a read in a render that doesn't commit. Read the proxy in callbacks, as the docs recommend.
+- **A write re-renders even if a later write sets the value back.** After `batch(() => { state.count = 1; state.count = 0 })`, a component that read `tracked.count` re-renders. In v2, it compared the values that it read.
+- **A descriptor read records whether the key is there, not its value.** `Object.getOwnPropertyDescriptor(tracked, 'count')` re-renders when `count` is added or deleted, not when its value changes. Read the value as `tracked.count`.
+- **`ref` keeps what it is given.** A value read from `useSnapshot` is the component's tracking object, so `ref(tracked.item)` stores that object. Wrap `snapshot(state).item` instead.
+- **Reads are kept until the object changes.** A render that only passes on an object, such as `tracked.item` as an effect dependency, uses it as a whole only if no earlier render read under it since it last changed. In v2, each render counted on its own. Call `trackKey(tracked.item)` when its identity matters.
+- **A frozen snapshot can't be read.** `useSnapshot` wraps the objects of a snapshot, which a frozen object doesn't allow, so a read throws a `TypeError`. In v2, the tracker copied a frozen object. Don't freeze snapshots.
+
+An object that a component passes on without reading under it, such as an effect dependency, a prop or a `proxySet` member, re-renders the component when anything under it changes, as in v2.
+
+## Getters run on the snapshot
+
+In v2, a snapshot stored the value of each getter of the state. In v3, the snapshot has the getter: each read runs it, with the snapshot, or the object that `useSnapshot` returns, as `this`.
+
+- **A component re-renders for what the getter reads through `this`.** A root getter such as `get total()` no longer makes the component depend on the whole state.
+- **Results aren't cached.** A getter that returns an object returns a new one on each read. To cache a result, use [proxy-memoize](https://github.com/dai-shi/proxy-memoize) or [valtio-reactive](https://github.com/valtiojs/valtio-reactive).
+- **An error from a getter is thrown when it is read**, not by `snapshot()`.
+- **Read the state through `this`.** A getter that reads `state.count` through a closure reads the live state, so a component doesn't re-render for it, and a snapshot doesn't keep its value. In development, a getter of an object warns once when it reads a property of a proxy, such as `state.count`, while it runs on a snapshot, also of a proxy marked with `ref` that it reaches through `this`. Other reads, such as `Object.keys(state)`, don't warn. A class getter is on the prototype, so it doesn't warn.
+- **Setters are left out of snapshots.** Assigning to a getter of a snapshot throws a `TypeError`. Write to the proxy.
+- **A change that a setter makes in place is heard once a component has subscribed.** A setter that changes an object that isn't proxied, such as `this.date.setTime(value)`, notifies its key, and a component subscribes when it commits. Such a change made before that, such as in a child's layout effect, isn't seen until the component renders again. Assign a new object, such as `this.date = new Date(value)`.
+
+```js
+const state = proxy({
+  count: 1,
+  // v2: worked, because the snapshot stored the value
+  // v3: reads the live state, and warns in development
+  get doubled() {
+    return state.count * 2
+  },
+  // v3: reads the snapshot that it runs on
+  get tripled() {
+    return this.count * 3
+  },
+})
+```
 
 ## Notifications are synchronous
 
@@ -121,7 +168,7 @@ In v2, `subscribe` callbacks were batched and called once per microtask, unless 
 - **Deleting a missing key doesn't notify.** In v2, `delete state.key` notified even when `state` had no `key`.
 - **Native array methods notify once per internal change.** `splice`, `sort` and similar methods make several changes, and each one notifies, so a subscriber can see the array in between. Wrap them in `batch` to notify once, with the final array.
 - **A proxy's own callbacks run before its parents'.** When a change notifies a proxy and its parents, the callbacks subscribed to the proxy run first, then those of its ancestors, nearest first. An ancestor reached by more than one path is notified once, at its nearest distance. Ancestors at the same distance have no set order.
-- **Unbatched loops are slower with `useSnapshot`, for now.** A component using `useSnapshot` takes a snapshot on every notification, so a loop of unbatched changes takes one snapshot per change. Wrap the loop in `batch`. A later v3 change removes this cost.
+- **`useSnapshot` takes a snapshot when it renders**, not on each notification, so a loop of unbatched changes re-renders a component once.
 
 | v2                                              | v3                                     |
 | ----------------------------------------------- | -------------------------------------- |

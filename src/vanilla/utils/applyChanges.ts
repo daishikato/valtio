@@ -4,7 +4,6 @@ import {
   unstable_isRef,
 } from '../../vanilla.js'
 import type { Snapshot } from '../../vanilla.js'
-import { getOriginalObject } from '../proxyCompare.js'
 
 const { batchAsWrite, getObjectId, proxyStateMap, snapCache, snapshotBrand } =
   unstable_getInternalStates()
@@ -18,10 +17,6 @@ const hasOwn = (obj: object, key: string | symbol): boolean =>
   Object.prototype.hasOwnProperty.call(obj, key)
 
 const isSnapshot = (x: object): boolean => hasOwn(x, snapshotBrand)
-
-// A value read from useSnapshot is unwrapped, so that reading it here isn't
-// recorded as a use by its component.
-const unwrap = (x: unknown): unknown => (isObject(x) ? getOriginalObject(x) : x)
 
 // Plain objects, arrays and snapshots are data, which is merged or copied.
 // Anything else is a value that an assignment stores as it is: a proxy, an
@@ -72,11 +67,34 @@ const isSnapshotOf = (snap: AnyObject, proxyObject: object): boolean =>
   snap[snapshotBrand] === getObjectId(proxyStateMap.get(proxyObject)![0])
 
 // Whether a snapshot is the one that a proxy has now, which means that
-// nothing changed under the proxy since. It makes no new snapshot.
+// nothing changed under the proxy since. It makes no new snapshot. A value
+// read from useSnapshot wraps the snapshot, so it is compared by its own
+// properties.
 const isCurrentSnapshot = (snap: object, proxyObject: object): boolean => {
   const [target, ensureVersion] = proxyStateMap.get(proxyObject)!
   const cache = snapCache.get(target)
-  return !!cache && cache[1] === snap && cache[0] === ensureVersion()
+  if (!cache || cache[0] !== ensureVersion()) {
+    return false
+  }
+  const current = cache[1] as object
+  if (current === snap) {
+    return true
+  }
+  const keys = Reflect.ownKeys(current)
+  const nextKeys = Reflect.ownKeys(snap)
+  return (
+    keys.length === nextKeys.length &&
+    keys.every((key, i) => {
+      const a = Reflect.getOwnPropertyDescriptor(current, key)!
+      const b = Reflect.getOwnPropertyDescriptor(snap, key)
+      return (
+        key === nextKeys[i] &&
+        Object.is(a.value, b?.value) &&
+        a.get === b?.get &&
+        a.enumerable === b?.enumerable
+      )
+    })
+  )
 }
 
 // The own enumerable keys, which leaves out the brand of a snapshot and the
@@ -122,7 +140,7 @@ const apply = (proxyObject: AnyObject, data: AnyObject): void => {
           key,
           isValue
             ? {
-                value: copy(unwrap(value[key])),
+                value: copy(value[key]),
                 writable: true,
                 enumerable: true,
                 configurable: true,
@@ -174,7 +192,7 @@ const apply = (proxyObject: AnyObject, data: AnyObject): void => {
         // Accessors are never written. The proxy has its own.
         continue
       }
-      const value = unwrap(next[key])
+      const value = next[key]
       const current = target[key]
       if (
         Object.is(current, value) &&
@@ -239,7 +257,7 @@ export function applyChanges<T extends object>(
       'applyChanges() requires a proxy as its first argument, and it cannot be a proxyMap or proxySet.',
     )
   }
-  const data = unwrap(next) as AnyObject
+  const data = next as AnyObject
   // A nested value of the other kind is replaced, but the proxy itself can't
   // be.
   if (Array.isArray(proxyObject) !== Array.isArray(data)) {
